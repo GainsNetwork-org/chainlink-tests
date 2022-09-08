@@ -17,7 +17,7 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
   using SafeMathChainlink for uint256;
 
   uint256 constant public EXPIRY_TIME = 5 minutes;
-  uint256 constant private MINIMUM_CONSUMER_GAS_LIMIT = 0;
+  uint256 constant private MINIMUM_CONSUMER_GAS_LIMIT = 400000;
   // We initialize fields to 1 instead of 0 so that the first invocation
   // does not cost more gas.
   uint256 constant private ONE_FOR_CONSISTENT_GAS_COST = 1;
@@ -147,7 +147,7 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
     require(commitments[_requestId] == paramsHash, "Params do not match request ID");
     withdrawableTokens = withdrawableTokens.add(_payment);
     delete commitments[_requestId];
-    require(gasleft() >= MINIMUM_CONSUMER_GAS_LIMIT, "Must provide consumer enough gas");
+    //require(gasleft() >= MINIMUM_CONSUMER_GAS_LIMIT, "Must provide consumer enough gas");
     // All updates to the oracle's fulfillment should come before calling the
     // callback(addr+functionId) as it is untrusted.
     // See: https://solidity.readthedocs.io/en/develop/security-considerations.html#use-the-checks-effects-interactions-pattern
