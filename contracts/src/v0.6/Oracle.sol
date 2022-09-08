@@ -17,7 +17,7 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
   using SafeMathChainlink for uint256;
 
   uint256 constant public EXPIRY_TIME = 5 minutes;
-  uint256 constant private MINIMUM_CONSUMER_GAS_LIMIT = 400000;
+  uint256 constant private MINIMUM_CONSUMER_GAS_LIMIT = 0;
   // We initialize fields to 1 instead of 0 so that the first invocation
   // does not cost more gas.
   uint256 constant private ONE_FOR_CONSISTENT_GAS_COST = 1;
