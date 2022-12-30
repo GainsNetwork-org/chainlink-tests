@@ -14,11 +14,14 @@ import (
 	evmmocks "github.com/smartcontractkit/chainlink/core/chains/evm/mocks"
 	"github.com/smartcontractkit/chainlink/core/chains/evm/txmgr"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
+	configtest "github.com/smartcontractkit/chainlink/core/internal/testutils/configtest/v2"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/keeper"
+	"github.com/smartcontractkit/chainlink/core/services/srvctest"
+	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
 const syncInterval = 1000 * time.Hour // prevents sync timer from triggering during test
@@ -32,12 +35,13 @@ func setupRegistrySync(t *testing.T, version keeper.RegistryVersion) (
 	job.Job,
 ) {
 	db := pgtest.NewSqlxDB(t)
-	korm := keeper.NewORM(db, logger.TestLogger(t), nil, nil)
+	cfg := configtest.NewGeneralConfig(t, nil)
+	scopedConfig := evmtest.NewChainScopedConfig(t, cfg)
+	korm := keeper.NewORM(db, logger.TestLogger(t), scopedConfig, nil)
 	ethClient := evmtest.NewEthClientMockWithDefaultChain(t)
 	lbMock := logmocks.NewBroadcaster(t)
 	lbMock.On("AddDependents", 1).Maybe()
 	j := cltest.MustInsertKeeperJob(t, db, korm, cltest.NewEIP55Address(), cltest.NewEIP55Address())
-	cfg := cltest.NewTestGeneralConfig(t)
 	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, Client: ethClient, LogBroadcaster: lbMock, GeneralConfig: cfg})
 	ch := evmtest.MustGetDefaultChain(t, cc)
 	keyStore := cltest.NewKeyStore(t, db, cfg)
@@ -64,6 +68,8 @@ func setupRegistrySync(t *testing.T, version keeper.RegistryVersion) (
 	})).Maybe().Return(func() {})
 	lbMock.On("IsConnected").Return(true).Maybe()
 
+	mailMon := srvctest.Start(t, utils.NewMailboxMonitor(t.Name()))
+
 	orm := keeper.NewORM(db, logger.TestLogger(t), ch.Config(), txmgr.SendEveryStrategy{})
 	synchronizer := keeper.NewRegistrySynchronizer(keeper.RegistrySynchronizerOptions{
 		Job:                      j,
@@ -71,10 +77,12 @@ func setupRegistrySync(t *testing.T, version keeper.RegistryVersion) (
 		ORM:                      orm,
 		JRM:                      jpv2.Jrm,
 		LogBroadcaster:           lbMock,
+		MailMon:                  mailMon,
 		SyncInterval:             syncInterval,
 		MinIncomingConfirmations: 1,
 		Logger:                   logger.TestLogger(t),
 		SyncUpkeepQueueSize:      syncUpkeepQueueSize,
+		EffectiveKeeperAddress:   j.KeeperSpec.FromAddress.Address(),
 	})
 	return db, synchronizer, ethClient, lbMock, j
 }

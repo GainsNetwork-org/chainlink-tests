@@ -13,6 +13,20 @@ type Config struct {
 	mock.Mock
 }
 
+// DatabaseDefaultQueryTimeout provides a mock function with given fields:
+func (_m *Config) DatabaseDefaultQueryTimeout() time.Duration {
+	ret := _m.Called()
+
+	var r0 time.Duration
+	if rf, ok := ret.Get(0).(func() time.Duration); ok {
+		r0 = rf()
+	} else {
+		r0 = ret.Get(0).(time.Duration)
+	}
+
+	return r0
+}
+
 // Dev provides a mock function with given fields:
 func (_m *Config) Dev() bool {
 	ret := _m.Called()
@@ -22,6 +36,20 @@ func (_m *Config) Dev() bool {
 		r0 = rf()
 	} else {
 		r0 = ret.Get(0).(bool)
+	}
+
+	return r0
+}
+
+// JobPipelineMaxSuccessfulRuns provides a mock function with given fields:
+func (_m *Config) JobPipelineMaxSuccessfulRuns() uint64 {
+	ret := _m.Called()
+
+	var r0 uint64
+	if rf, ok := ret.Get(0).(func() uint64); ok {
+		r0 = rf()
+	} else {
+		r0 = ret.Get(0).(uint64)
 	}
 
 	return r0

@@ -2,9 +2,7 @@ package logger
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,8 +13,18 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+func (cfg zapDiskLoggerConfig) newTestLogger(t *testing.T, zcfg zap.Config, cores ...zapcore.Core) Logger {
+	lggr, closeLggr, err := cfg.newLogger(zcfg, cores...)
+	assert.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, closeLggr())
+	})
+	return lggr
+}
 
 func TestZapLogger_OutOfDiskSpace(t *testing.T) {
 	cfg := newZapConfigBase()
@@ -31,7 +39,7 @@ func TestZapLogger_OutOfDiskSpace(t *testing.T) {
 	logsDir := t.TempDir()
 	tmpFile, err := os.CreateTemp(logsDir, "*")
 	assert.NoError(t, err)
-	defer tmpFile.Close()
+	defer func() { assert.NoError(t, tmpFile.Close()) }()
 
 	var logFileSize utils.FileSize
 	err = logFileSize.UnmarshalText([]byte("100mb"))
@@ -65,17 +73,15 @@ func TestZapLogger_OutOfDiskSpace(t *testing.T) {
 		}
 		zapCfg.local.FileMaxSizeMB = int(maxSize/utils.MB) * 2
 
-		lggr, close, err := zapCfg.newLogger(cfg)
-		assert.NoError(t, err)
-		defer close()
+		lggr := zapCfg.newTestLogger(t, cfg)
 
 		pollChan <- time.Now()
 		<-zapCfg.testDiskLogLvlChan
 
 		lggr.Debug("trying to write to disk when the disk logs should not be created")
 
-		logFile := filepath.Join(zapCfg.local.Dir, LogsFile)
-		_, err = ioutil.ReadFile(logFile)
+		logFile := zapCfg.local.LogsFile()
+		_, err = os.ReadFile(logFile)
 
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "no such file or directory")
@@ -98,17 +104,15 @@ func TestZapLogger_OutOfDiskSpace(t *testing.T) {
 		}
 		zapCfg.local.FileMaxSizeMB = int(maxSize/utils.MB) * 2
 
-		lggr, close, err := zapCfg.newLogger(cfg)
-		assert.NoError(t, err)
-		defer close()
+		lggr := zapCfg.newTestLogger(t, cfg)
 
 		pollChan <- time.Now()
 		<-zapCfg.testDiskLogLvlChan
 
 		lggr.Debug("trying to write to disk when the disk logs should not be created - generic error")
 
-		logFile := filepath.Join(zapCfg.local.Dir, LogsFile)
-		_, err = ioutil.ReadFile(logFile)
+		logFile := zapCfg.local.LogsFile()
+		_, err = os.ReadFile(logFile)
 
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "no such file or directory")
@@ -131,9 +135,7 @@ func TestZapLogger_OutOfDiskSpace(t *testing.T) {
 		}
 		zapCfg.local.FileMaxSizeMB = int(maxSize/utils.MB) * 2
 
-		lggr, close, err := zapCfg.newLogger(cfg)
-		assert.NoError(t, err)
-		defer close()
+		lggr := zapCfg.newTestLogger(t, cfg)
 
 		lggr.Debug("writing to disk on test")
 
@@ -146,8 +148,8 @@ func TestZapLogger_OutOfDiskSpace(t *testing.T) {
 		lggr.Debug("writing to disk on test again")
 		lggr.Warn("writing to disk on test again")
 
-		logFile := filepath.Join(zapCfg.local.Dir, LogsFile)
-		b, err := ioutil.ReadFile(logFile)
+		logFile := zapCfg.local.LogsFile()
+		b, err := os.ReadFile(logFile)
 		assert.NoError(t, err)
 
 		logs := string(b)
@@ -180,9 +182,7 @@ func TestZapLogger_OutOfDiskSpace(t *testing.T) {
 		}
 		zapCfg.local.FileMaxSizeMB = int(maxSize/utils.MB) * 2
 
-		lggr, close, err := zapCfg.newLogger(cfg)
-		assert.NoError(t, err)
-		defer close()
+		lggr := zapCfg.newTestLogger(t, cfg)
 
 		lggr.Debug("test")
 
@@ -198,8 +198,8 @@ func TestZapLogger_OutOfDiskSpace(t *testing.T) {
 
 		lggr.Debug("test again")
 
-		logFile := filepath.Join(zapCfg.local.Dir, LogsFile)
-		b, err := ioutil.ReadFile(logFile)
+		logFile := zapCfg.local.LogsFile()
+		b, err := os.ReadFile(logFile)
 		assert.NoError(t, err)
 
 		logs := string(b)
@@ -230,7 +230,7 @@ func TestZapLogger_LogCaller(t *testing.T) {
 	logsDir := t.TempDir()
 	tmpFile, err := os.CreateTemp(logsDir, "*")
 	assert.NoError(t, err)
-	defer tmpFile.Close()
+	defer func() { assert.NoError(t, tmpFile.Close()) }()
 
 	var logFileSize utils.FileSize
 	err = logFileSize.UnmarshalText([]byte("100mb"))
@@ -263,21 +263,19 @@ func TestZapLogger_LogCaller(t *testing.T) {
 	}
 	zapCfg.local.FileMaxSizeMB = int(maxSize/utils.MB) * 2
 
-	lggr, closeLggr, err := zapCfg.newLogger(cfg)
-	assert.NoError(t, err)
-	defer closeLggr()
+	lggr := zapCfg.newTestLogger(t, cfg)
 
 	lggr.Debug("test message with caller")
 
 	pollChan <- time.Now()
 	<-zapCfg.testDiskLogLvlChan
 
-	logFile := filepath.Join(zapCfg.local.Dir, LogsFile)
-	b, err := ioutil.ReadFile(logFile)
+	logFile := zapCfg.local.LogsFile()
+	b, err := os.ReadFile(logFile)
 	assert.NoError(t, err)
 
 	logs := string(b)
 	lines := strings.Split(logs, "\n")
 
-	require.Contains(t, lines[0], "logger/zap_test.go:270")
+	require.Contains(t, lines[0], "logger/zap_test.go:268")
 }

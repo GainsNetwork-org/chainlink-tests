@@ -3,20 +3,28 @@ package pg_test
 import (
 	"context"
 	"testing"
+	"time"
 
-	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils"
+	configtest "github.com/smartcontractkit/chainlink/core/internal/testutils/configtest/v2"
 	"github.com/smartcontractkit/chainlink/core/logger"
+	"github.com/smartcontractkit/chainlink/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/core/services/pg"
+	"github.com/smartcontractkit/chainlink/core/store/models"
 
 	"github.com/stretchr/testify/require"
-	"gopkg.in/guregu/null.v4"
 )
+
+func lease(c *chainlink.Config, s *chainlink.Secrets) {
+	t := true
+	c.Database.Lock.Enabled = &t
+	c.Database.Lock.LeaseDuration = models.MustNewDuration(10 * time.Second)
+	c.Database.Lock.LeaseRefreshInterval = models.MustNewDuration(time.Second)
+}
 
 func TestLockedDB_HappyPath(t *testing.T) {
 	testutils.SkipShortDB(t)
-	config := cltest.NewTestGeneralConfig(t)
-	config.Overrides.DatabaseLockingMode = null.StringFrom("dual")
+	config := configtest.NewGeneralConfig(t, lease)
 	lggr := logger.TestLogger(t)
 	ldb := pg.NewLockedDB(config, lggr)
 
@@ -31,8 +39,7 @@ func TestLockedDB_HappyPath(t *testing.T) {
 
 func TestLockedDB_ContextCancelled(t *testing.T) {
 	testutils.SkipShortDB(t)
-	config := cltest.NewTestGeneralConfig(t)
-	config.Overrides.DatabaseLockingMode = null.StringFrom("dual")
+	config := configtest.NewGeneralConfig(t, lease)
 	lggr := logger.TestLogger(t)
 	ldb := pg.NewLockedDB(config, lggr)
 
@@ -45,8 +52,7 @@ func TestLockedDB_ContextCancelled(t *testing.T) {
 
 func TestLockedDB_OpenTwice(t *testing.T) {
 	testutils.SkipShortDB(t)
-	config := cltest.NewTestGeneralConfig(t)
-	config.Overrides.DatabaseLockingMode = null.StringFrom("lease")
+	config := configtest.NewGeneralConfig(t, lease)
 	lggr := logger.TestLogger(t)
 	ldb := pg.NewLockedDB(config, lggr)
 
@@ -61,8 +67,7 @@ func TestLockedDB_OpenTwice(t *testing.T) {
 
 func TestLockedDB_TwoInstances(t *testing.T) {
 	testutils.SkipShortDB(t)
-	config := cltest.NewTestGeneralConfig(t)
-	config.Overrides.DatabaseLockingMode = null.StringFrom("dual")
+	config := configtest.NewGeneralConfig(t, lease)
 	lggr := logger.TestLogger(t)
 
 	ldb1 := pg.NewLockedDB(config, lggr)
@@ -83,15 +88,14 @@ func TestLockedDB_TwoInstances(t *testing.T) {
 
 func TestOpenUnlockedDB(t *testing.T) {
 	testutils.SkipShortDB(t)
-	config := cltest.NewTestGeneralConfig(t)
-	lggr := logger.TestLogger(t)
+	config := configtest.NewGeneralConfig(t, nil)
 
-	db1, err1 := pg.OpenUnlockedDB(config, lggr)
+	db1, err1 := pg.OpenUnlockedDB(config)
 	require.NoError(t, err1)
 	require.NotNil(t, db1)
 
 	// should not block the second connection
-	db2, err2 := pg.OpenUnlockedDB(config, lggr)
+	db2, err2 := pg.OpenUnlockedDB(config)
 	require.NoError(t, err2)
 	require.NotNil(t, db2)
 

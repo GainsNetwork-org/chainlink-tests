@@ -22,12 +22,15 @@ import (
 	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/offchain_aggregator_wrapper"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils/configtest"
+	configtest "github.com/smartcontractkit/chainlink/core/internal/testutils/configtest/v2"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
+	v2 "github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest/v2"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/ocr"
 	ocrmocks "github.com/smartcontractkit/chainlink/core/services/ocr/mocks"
+	"github.com/smartcontractkit/chainlink/core/services/srvctest"
+	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
 func mustNewContract(t *testing.T, address gethCommon.Address) *offchain_aggregator_wrapper.OffchainAggregator {
@@ -80,6 +83,7 @@ func newContractTrackerUni(t *testing.T, opts ...interface{}) (uni contractTrack
 	uni.hb = htmocks.NewHeadBroadcaster(t)
 	uni.ec = evmtest.NewEthClientMock(t)
 
+	mailMon := srvctest.Start(t, utils.NewMailboxMonitor(t.Name()))
 	db := pgtest.NewSqlxDB(t)
 	uni.tracker = ocr.NewOCRContractTracker(
 		contract,
@@ -93,6 +97,7 @@ func newContractTrackerUni(t *testing.T, opts ...interface{}) (uni contractTrack
 		uni.db,
 		cfg,
 		uni.hb,
+		mailMon,
 	)
 
 	return uni
@@ -102,7 +107,7 @@ func Test_OCRContractTracker_LatestBlockHeight(t *testing.T) {
 	t.Parallel()
 
 	t.Run("on L2 chains, always returns 0", func(t *testing.T) {
-		uni := newContractTrackerUni(t, evmtest.ChainOptimismMainnet(t))
+		uni := newContractTrackerUni(t, v2.ChainOptimismMainnet(t))
 		l, err := uni.tracker.LatestBlockHeight(testutils.Context(t))
 		require.NoError(t, err)
 

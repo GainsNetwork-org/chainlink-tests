@@ -1,18 +1,12 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"strings"
-	"time"
 
 	"github.com/pkg/errors"
-
-	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
 // fatal means this transaction can never be accepted even with a different nonce or higher gas price
@@ -49,7 +43,7 @@ const (
 	InsufficientEth
 	TxFeeExceedsCap
 	// Note: L2FeeTooLow/L2FeeTooHigh/L2Full have a very specific meaning specific
-	// to L2s (Arbitrum, Optimism and clones). Do not implement this for non-L2
+	// to L2s (Arbitrum and clones). Do not implement this for non-L2
 	// chains. This is potentially confusing because some RPC nodes e.g.
 	// Nethermind implement an error called `FeeTooLow` which has distinct
 	// meaning from this one.
@@ -122,7 +116,7 @@ var erigon = ClientErrors{
 // Arbitrum
 // https://github.com/OffchainLabs/arbitrum/blob/cac30586bc10ecc1ae73e93de517c90984677fdb/packages/arb-evm/evm/result.go#L158
 // nitro: https://github.com/OffchainLabs/go-ethereum/blob/master/core/state_transition.go
-var arbitrumFatal = regexp.MustCompile(`(: |^)(invalid message format|forbidden sender address|execution reverted(: error code)?)$|(: |^)nonce too high(:|$)`)
+var arbitrumFatal = regexp.MustCompile(`(: |^)(invalid message format|forbidden sender address)$|(: |^)(nonce too high|execution reverted)(:|$)`)
 var arbitrum = ClientErrors{
 	// TODO: Arbitrum returns this in case of low or high nonce. Update this when Arbitrum fix it
 	// https://app.shortcut.com/chainlinklabs/story/16801/add-full-support-for-incorrect-nonce-on-arbitrum
@@ -134,6 +128,9 @@ var arbitrum = ClientErrors{
 	L2Full:                regexp.MustCompile(`(: |^)(queue full|sequencer pending tx pool full, please try again)(:|$)`),
 }
 
+// Optimism Bedrock introduced the same errors as geth
+// https://github.com/ethereum-optimism/op-geth/blob/optimism/core/error.go
+// TODO: remove this when all Optimism networks have migrated: https://app.shortcut.com/chainlinklabs/story/55389/remove-optimism-pre-bedrock-error-messages
 var optimism = ClientErrors{
 	L2FeeTooLow:  regexp.MustCompile(`(: |^)fee too low: \d+, use at least tx.gasLimit = \d+ and tx.gasPrice = \d+$`),
 	L2FeeTooHigh: regexp.MustCompile(`(: |^)fee too high: \d+, use less than \d+ \* [0-9\.]+$`),
@@ -153,6 +150,20 @@ var avalanche = ClientErrors{
 	NonceTooLow: regexp.MustCompile(`(: |^)nonce too low: address 0x[0-9a-fA-F]{40} current nonce \([\d]+\) > tx nonce \([\d]+\)$`),
 }
 
+// Klaytn
+// https://github.com/klaytn/klaytn/blob/dev/blockchain/error.go
+// https://github.com/klaytn/klaytn/blob/dev/blockchain/tx_pool.go
+var klaytn = ClientErrors{
+	NonceTooLow:                       regexp.MustCompile(`(: |^)nonce too low$`),                                                                                    // retry with an increased nonce
+	TransactionAlreadyInMempool:       regexp.MustCompile(`(: |^)(known transaction)`),                                                                               // don't send the tx again. The exactly same tx is already in the mempool
+	ReplacementTransactionUnderpriced: regexp.MustCompile(`(: |^)replacement transaction underpriced$|there is another tx which has the same nonce in the tx pool$`), // retry with an increased gasPrice or maxFeePerGas. This error happened when there is another tx having higher gasPrice or maxFeePerGas exist in the mempool
+	TerminallyUnderpriced:             regexp.MustCompile(`(: |^)(transaction underpriced|^intrinsic gas too low)`),                                                  // retry with an increased gasPrice or maxFeePerGas
+	LimitReached:                      regexp.MustCompile(`(: |^)txpool is full`),                                                                                    // retry with few seconds wait
+	InsufficientEth:                   regexp.MustCompile(`(: |^)insufficient funds`),                                                                                // stop to send a tx. The sender address doesn't have enough KLAY
+	TxFeeExceedsCap:                   regexp.MustCompile(`(: |^)(invalid gas fee cap|max fee per gas higher than max priority fee per gas)`),                        // retry with a valid gasPrice, maxFeePerGas, or maxPriorityFeePerGas. The new value can get from the return of `eth_gasPrice`
+	Fatal:                             gethFatal,
+}
+
 // Nethermind
 // All errors: https://github.com/NethermindEth/nethermind/blob/master/src/Nethermind/Nethermind.TxPool/AcceptTxResult.cs
 // All filters: https://github.com/NethermindEth/nethermind/tree/9b68ec048c65f4b44fb863164c0dec3f7780d820/src/Nethermind/Nethermind.TxPool/Filters
@@ -169,7 +180,7 @@ var nethermind = ClientErrors{
 	TransactionAlreadyInMempool: regexp.MustCompile(`(: |^)(AlreadyKnown|OwnNonceAlreadyUsed)$`),
 
 	// InsufficientFunds: Sender account has not enough balance to execute this transaction.
-	InsufficientEth: regexp.MustCompile(`(: |^)InsufficientFunds$`),
+	InsufficientEth: regexp.MustCompile(`(: |^)InsufficientFunds(, Account balance: \d+, cumulative cost: \d+)?$`),
 	Fatal:           nethermindFatal,
 }
 
@@ -181,7 +192,7 @@ var harmony = ClientErrors{
 	Fatal:                   harmonyFatal,
 }
 
-var clients = []ClientErrors{parity, geth, arbitrum, optimism, metis, substrate, avalanche, nethermind, harmony, besu, erigon}
+var clients = []ClientErrors{parity, geth, arbitrum, optimism, metis, substrate, avalanche, nethermind, harmony, besu, erigon, klaytn}
 
 func (s *SendError) is(errorType int) bool {
 	if s == nil || s.err == nil {
@@ -323,15 +334,33 @@ func (err *JsonError) String() string {
 	return fmt.Sprintf("json-rpc error { Code = %d, Message = '%s', Data = '%v' }", err.Code, err.Message, err.Data)
 }
 
-func ExtractRPCError(err error) *JsonError {
-	jErr, eErr := extractRPCError(err)
+func ExtractRPCErrorOrNil(err error) *JsonError {
+	jErr, eErr := ExtractRPCError(err)
 	if eErr != nil {
 		return nil
 	}
 	return jErr
 }
 
-func extractRPCError(baseErr error) (*JsonError, error) {
+// ExtractRPCError attempts to extract a full JsonError (including revert reason details)
+// from an error returned by a CallContract to an external RPC. As per https://github.com/ethereum/go-ethereum/blob/c49e065fea78a5d3759f7853a608494913e5824e/internal/ethapi/api.go#L974
+// CallContract server side for a revert will return an error which contains either:
+//   - The error directly from the EVM if there's no data (no revert reason, like an index out of bounds access) which
+//     when marshalled will only have a Message.
+//   - An error which implements rpc.DataError which when marshalled will have a Data field containing the execution result.
+//     If the revert not a custom Error (solidity >= 0.8.0), like require(1 == 2, "revert"), then geth and forks will automatically
+//     parse the string and put it in the message. If its a custom error, it's up to the client to decode the Data field which will be
+//     the abi encoded data of the custom error, i.e. revert MyCustomError(10) -> keccak(MyCustomError(uint256))[:4] || abi.encode(10).
+//
+// However, it appears that RPCs marshal this in different ways into a JsonError object received client side,
+// some adding "Reverted" prefixes, removing the method signature etc. To avoid RPC specific parsing and support custom errors
+// we return the full object returned from the RPC with a String() method that stringifies all fields for logging so no information is lost.
+// Some examples:
+// kovan (parity)
+// { "error": { "code" : -32015, "data": "Reverted 0xABC123...", "message": "VM execution error." } } // revert reason always omitted from message.
+// rinkeby / ropsten (geth)
+// { "error":  { "code": 3, "data": "0xABC123...", "message": "execution reverted: hello world" } } // revert reason automatically parsed if a simple require and included in message.
+func ExtractRPCError(baseErr error) (*JsonError, error) {
 	if baseErr == nil {
 		return nil, errors.New("no error present")
 	}
@@ -349,55 +378,4 @@ func extractRPCError(baseErr error) (*JsonError, error) {
 		return nil, errors.Errorf("not a RPCError because it does not have a code (got: %v)", baseErr)
 	}
 	return &jErr, nil
-}
-
-// ExtractRevertReasonFromRPCError attempts to extract the revert reason from the response of
-// an RPC eth_call that reverted by parsing the message from the "data" field
-// ex:
-// kovan (parity)
-// { "error": { "code" : -32015, "data": "Reverted 0xABC123...", "message": "VM execution error." } } // revert reason always omitted
-// rinkeby / ropsten (geth)
-// { "error":  { "code": 3, "data": "0x0xABC123...", "message": "execution reverted: hello world" } } // revert reason included in message
-func ExtractRevertReasonFromRPCError(err error) (string, error) {
-	jErr, eErr := extractRPCError(err)
-	if eErr != nil {
-		return "", eErr
-	}
-	dataStr, ok := jErr.Data.(string)
-	if !ok {
-		return "", errors.New("invalid error type")
-	}
-	matches := hexDataRegex.FindStringSubmatch(dataStr)
-	if len(matches) != 1 {
-		return "", errors.New("unknown data payload format")
-	}
-	hexData := utils.RemoveHexPrefix(matches[0])
-	if len(hexData) < 8 {
-		return "", errors.New("unknown data payload format")
-	}
-	revertReasonBytes, err := hex.DecodeString(hexData[8:])
-	if err != nil {
-		return "", errors.Wrap(err, "unable to decode hex to bytes")
-	}
-
-	ln := len(revertReasonBytes)
-	breaker := time.After(time.Second * 5)
-cleanup:
-	for {
-		select {
-		case <-breaker:
-			break cleanup
-		default:
-			revertReasonBytes = bytes.Trim(revertReasonBytes, "\x00")
-			revertReasonBytes = bytes.Trim(revertReasonBytes, "\x11")
-			revertReasonBytes = bytes.TrimSpace(revertReasonBytes)
-			if ln == len(revertReasonBytes) {
-				break cleanup
-			}
-			ln = len(revertReasonBytes)
-		}
-	}
-
-	revertReason := strings.TrimSpace(string(revertReasonBytes))
-	return revertReason, nil
 }

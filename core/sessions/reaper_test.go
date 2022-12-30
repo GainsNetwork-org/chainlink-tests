@@ -8,6 +8,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
+	"github.com/smartcontractkit/chainlink/core/logger/audit"
 	"github.com/smartcontractkit/chainlink/core/sessions"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 
@@ -32,11 +33,12 @@ func TestSessionReaper_ReapSessions(t *testing.T) {
 	db := pgtest.NewSqlxDB(t)
 	config := sessionReaperConfig{}
 	lggr := logger.TestLogger(t)
-	cfg := cltest.NewTestGeneralConfig(t)
-	orm := sessions.NewORM(db, config.SessionTimeout().Duration(), lggr, cfg)
+	orm := sessions.NewORM(db, config.SessionTimeout().Duration(), lggr, pgtest.NewQConfig(true), audit.NoopLogger)
 
 	r := sessions.NewSessionReaper(db.DB, config, lggr)
-	defer r.Stop()
+	t.Cleanup(func() {
+		assert.NoError(t, r.Stop())
+	})
 
 	tests := []struct {
 		name     string

@@ -118,6 +118,29 @@ type Session struct {
 	Password string `json:"password"`
 }
 
+// ExportedEVMKey holds all details needed to recreate a private key of the Chainlink node
+type ExportedEVMKey struct {
+	Address string `json:"address"`
+	Crypto  struct {
+		Cipher       string `json:"cipher"`
+		CipherText   string `json:"ciphertext"`
+		CipherParams struct {
+			Iv string `json:"iv"`
+		} `json:"cipherparams"`
+		Kdf       string `json:"kdf"`
+		KDFParams struct {
+			DkLen int    `json:"dklen"`
+			N     int    `json:"n"`
+			P     int    `json:"p"`
+			R     int    `json:"r"`
+			Salt  string `json:"salt"`
+		} `json:"kdfparams"`
+		Mac string `json:"mac"`
+	} `json:"crypto"`
+	ID      string `json:"id"`
+	Version int    `json:"version"`
+}
+
 // VRFExportKey is the model that represents the exported VRF key
 type VRFExportKey struct {
 	PublicKey string `json:"PublicKey"`
@@ -788,6 +811,7 @@ type OCRTaskJobSpec struct {
 	ContractConfirmations    int           `toml:"contractConfigConfirmations"`            // Optional
 	TrackerPollInterval      time.Duration `toml:"contractConfigTrackerPollInterval"`      // Optional
 	TrackerSubscribeInterval time.Duration `toml:"contractConfigTrackerSubscribeInterval"` // Optional
+	ForwardingAllowed        bool          `toml:"forwardingAllowed"`                      // Optional, by default false
 	ContractAddress          string        `toml:"contractAddress"`                        // Address of the OCR contract
 	P2PBootstrapPeers        []*Chainlink  `toml:"p2pBootstrapPeers"`                      // P2P ID of the bootstrap node
 	IsBootstrapPeer          bool          `toml:"isBootstrapPeer"`                        // Typically false
@@ -805,7 +829,7 @@ type P2PData struct {
 	PeerID     string
 }
 
-func (p P2PData) P2PV2Bootstrapper() string {
+func (p *P2PData) P2PV2Bootstrapper() string {
 	if p.RemotePort == "" {
 		p.RemotePort = "6690"
 	}
@@ -843,6 +867,7 @@ func (o *OCRTaskJobSpec) String() (string, error) {
 		MonitoringEndpoint       string
 		TransmitterAddress       string
 		ObservationSource        string
+		ForwardingAllowed        bool
 	}{
 		Name:                     o.Name,
 		BlockChainTimeout:        o.BlockChainTimeout,
@@ -857,6 +882,7 @@ func (o *OCRTaskJobSpec) String() (string, error) {
 		MonitoringEndpoint:       o.MonitoringEndpoint,
 		TransmitterAddress:       o.TransmitterAddress,
 		ObservationSource:        o.ObservationSource,
+		ForwardingAllowed:        o.ForwardingAllowed,
 	}
 	// Results in /dns4//tcp/6690/p2p/12D3KooWAuC9xXBnadsYJpqzZZoB4rMRWqRGpxCrr2mjS7zCoAdN\
 	ocrTemplateString := `type = "offchainreporting"
@@ -880,6 +906,7 @@ p2pPeerID                              = "{{.P2PPeerID}}"
 keyBundleID                            = "{{.KeyBundleID}}"
 monitoringEndpoint                     ={{if not .MonitoringEndpoint}} "chain.link:4321" {{else}} "{{.MonitoringEndpoint}}" {{end}}
 transmitterAddress                     = "{{.TransmitterAddress}}"
+forwardingAllowed					   = {{.ForwardingAllowed}}
 observationSource                      = """
 {{.ObservationSource}}
 """`
@@ -935,41 +962,37 @@ func (o *OCR2TaskJobSpec) String() (string, error) {
 		TrackerPollInterval:   o.OCR2OracleSpec.ContractConfigTrackerPollInterval.Duration(),
 		ObservationSource:     o.ObservationSource,
 	}
-	ocr2TemplateString := `type = "{{ .JobType }}"
+	ocr2TemplateString := `
+type                                   = "{{ .JobType }}"
+name                                   = "{{.Name}}"
+{{if .PluginType}}
+pluginType                             = "{{ .PluginType }}" {{end}}
+relay                                  = "{{.Relay}}"
 schemaVersion                          = 1
+contractID                             = "{{.ContractID}}"
+{{if eq .JobType "offchainreporting2" }}
+ocrKeyBundleID                         = "{{.OCRKeyBundleID}}" {{end}}
+{{if eq .JobType "offchainreporting2" }}
+transmitterID                          = "{{.TransmitterID}}" {{end}}
 blockchainTimeout                      ={{if not .BlockchainTimeout}} "20s" {{else}} "{{.BlockchainTimeout}}" {{end}}
 contractConfigConfirmations            ={{if not .ContractConfirmations}} 3 {{else}} {{.ContractConfirmations}} {{end}}
 contractConfigTrackerPollInterval      ={{if not .TrackerPollInterval}} "1m" {{else}} "{{.TrackerPollInterval}}" {{end}}
 contractConfigTrackerSubscribeInterval ={{if not .TrackerSubscribeInterval}} "2m" {{else}} "{{.TrackerSubscribeInterval}}" {{end}}
-name 																	 = "{{.Name}}"
-relay																	 = "{{.Relay}}"
-contractID		                         = "{{.ContractID}}"
 {{if .P2PV2Bootstrappers}}
-p2pv2Bootstrappers                      = [
-  {{range .P2PV2Bootstrappers}}"{{.}}",
-  {{end}}
-]
-{{else}}
-p2pv2Bootstrappers                      = []
-{{end}}
-monitoringEndpoint                     ={{if not .MonitoringEndpoint}} "chain.link:4321" {{else}} "{{.MonitoringEndpoint}}" {{end}}
-{{if eq .JobType "offchainreporting2" }}
-pluginType                             = "{{ .PluginType }}"
-ocrKeyBundleID                         = "{{.OCRKeyBundleID}}"
-transmitterID                     		 = "{{.TransmitterID}}"
+p2pv2Bootstrappers                     = [{{range .P2PV2Bootstrappers}}"{{.}}",{{end}}]{{end}}
+{{if .MonitoringEndpoint}}
+monitoringEndpoint                     = "{{.MonitoringEndpoint}}" {{end}}
+{{if .ObservationSource}}
 observationSource                      = """
 {{.ObservationSource}}
-"""
-[pluginConfig]
-{{range $key, $value := .PluginConfig}}
-{{$key}} = {{$value}}
+"""{{end}}
+{{if eq .JobType "offchainreporting2" }}
+[pluginConfig]{{range $key, $value := .PluginConfig}}
+{{$key}} = {{$value}}{{end}}
 {{end}}
-{{end}}
-
-[relayConfig]
-{{range $key, $value := .RelayConfig}}
-{{$key}} = {{$value}}
-{{end}}`
+[relayConfig]{{range $key, $value := .RelayConfig}}
+{{$key}} = {{$value}}{{end}}
+`
 
 	return marshallTemplate(specWrap, "OCR2 Job", ocr2TemplateString)
 }
@@ -1200,4 +1223,29 @@ func NewBlankChainlinkProfileResults() *ChainlinkProfileResults {
 type CLNodesWithKeys struct {
 	Node       *Chainlink
 	KeysBundle NodeKeysBundle
+}
+
+// Forwarder the model that represents the created Forwarder when created
+type Forwarder struct {
+	Data ForwarderData `json:"data"`
+}
+
+// Forwarders is the model that represents the created Forwarders when read
+type Forwarders struct {
+	Data []Forwarder `json:"data"`
+}
+
+// ForwarderData is the model that represents the created Forwarder when read
+type ForwarderData struct {
+	ID        string    `json:"id"`
+	Address   string    `json:"address"`
+	ChainID   string    `json:"chainId"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// ForwarderAttributes is the model that represents attributes of a Forwarder
+type ForwarderAttributes struct {
+	Address string `json:"address"`
+	ChainID string `json:"chainID"`
 }

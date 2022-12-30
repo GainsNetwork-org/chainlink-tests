@@ -12,35 +12,41 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/guregu/null.v4"
 
 	"github.com/smartcontractkit/chainlink/core/assets"
+	"github.com/smartcontractkit/chainlink/core/bridges"
 	"github.com/smartcontractkit/chainlink/core/chains/evm/log"
 	log_mocks "github.com/smartcontractkit/chainlink/core/chains/evm/log/mocks"
+	"github.com/smartcontractkit/chainlink/core/config"
 	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/operator_wrapper"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils/configtest"
+	configtest "github.com/smartcontractkit/chainlink/core/internal/testutils/configtest/v2"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
+	"github.com/smartcontractkit/chainlink/core/services/chainlink"
 	"github.com/smartcontractkit/chainlink/core/services/directrequest"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/pg"
 	"github.com/smartcontractkit/chainlink/core/services/pipeline"
 	pipeline_mocks "github.com/smartcontractkit/chainlink/core/services/pipeline/mocks"
+	"github.com/smartcontractkit/chainlink/core/services/srvctest"
+	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
 func TestDelegate_ServicesForSpec(t *testing.T) {
 	ethClient := evmtest.NewEthClientMockWithDefaultChain(t)
 	runner := pipeline_mocks.NewRunner(t)
 	db := pgtest.NewSqlxDB(t)
-	cfg := configtest.NewTestGeneralConfig(t)
-	cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
-	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient})
+	cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+		c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)
+	})
+	mailMon := srvctest.Start(t, utils.NewMailboxMonitor(t.Name()))
+	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient, MailMon: mailMon})
 
 	lggr := logger.TestLogger(t)
-	delegate := directrequest.NewDelegate(lggr, runner, nil, cc)
+	delegate := directrequest.NewDelegate(lggr, runner, nil, cc, mailMon)
 
 	t.Run("Spec without DirectRequestSpec", func(t *testing.T) {
 		spec := job.Job{}
@@ -66,20 +72,23 @@ type DirectRequestUniverse struct {
 	cleanup        func()
 }
 
-func NewDirectRequestUniverseWithConfig(t *testing.T, cfg *configtest.TestGeneralConfig, specF func(spec *job.Job)) *DirectRequestUniverse {
+func NewDirectRequestUniverseWithConfig(t *testing.T, cfg config.GeneralConfig, specF func(spec *job.Job)) *DirectRequestUniverse {
 	ethClient := evmtest.NewEthClientMockWithDefaultChain(t)
 	broadcaster := log_mocks.NewBroadcaster(t)
 	runner := pipeline_mocks.NewRunner(t)
 	broadcaster.On("AddDependents", 1)
 
+	mailMon := srvctest.Start(t, utils.NewMailboxMonitor(t.Name()))
+
 	db := pgtest.NewSqlxDB(t)
-	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient, LogBroadcaster: broadcaster})
+	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, GeneralConfig: cfg, Client: ethClient, LogBroadcaster: broadcaster, MailMon: mailMon})
 	lggr := logger.TestLogger(t)
 	orm := pipeline.NewORM(db, lggr, cfg)
+	btORM := bridges.NewORM(db, lggr, cfg)
 
 	keyStore := cltest.NewKeyStore(t, db, cfg)
-	jobORM := job.NewORM(db, cc, orm, keyStore, lggr, cfg)
-	delegate := directrequest.NewDelegate(lggr, runner, orm, cc)
+	jobORM := job.NewORM(db, cc, orm, btORM, keyStore, lggr, cfg)
+	delegate := directrequest.NewDelegate(lggr, runner, orm, cc, mailMon)
 
 	jb := cltest.MakeDirectRequestJobSpec(t)
 	jb.ExternalJobID = uuid.NewV4()
@@ -111,8 +120,9 @@ func NewDirectRequestUniverseWithConfig(t *testing.T, cfg *configtest.TestGenera
 }
 
 func NewDirectRequestUniverse(t *testing.T) *DirectRequestUniverse {
-	cfg := configtest.NewTestGeneralConfig(t)
-	cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
+	cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+		c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)
+	})
 	return NewDirectRequestUniverseWithConfig(t, cfg, nil)
 }
 
@@ -153,7 +163,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 			Run(func(args mock.Arguments) {
 				runBeganAwaiter.ItHappened()
 				fn := args.Get(4).(func(pg.Queryer) error)
-				fn(nil)
+				require.NoError(t, fn(nil))
 			}).Once()
 
 		err := uni.service.Start(testutils.Context(t))
@@ -210,7 +220,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 			Run(func(args mock.Arguments) {
 				runBeganAwaiter.ItHappened()
 				fn := args.Get(4).(func(pg.Queryer) error)
-				fn(nil)
+				require.NoError(t, fn(nil))
 			}).Once().Return(false, nil)
 
 		// but should after this one, as the head Number is larger
@@ -342,9 +352,10 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 	})
 
 	t.Run("Log has sufficient funds", func(t *testing.T) {
-		cfg := configtest.NewTestGeneralConfig(t)
-		cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
-		cfg.Overrides.GlobalMinimumContractPayment = assets.NewLinkFromJuels(100)
+		cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+			c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)
+			c.EVM[0].MinContractPayment = assets.NewLinkFromJuels(100)
+		})
 		uni := NewDirectRequestUniverseWithConfig(t, cfg, nil)
 		defer uni.Cleanup()
 
@@ -372,7 +383,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		uni.runner.On("Run", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 			runBeganAwaiter.ItHappened()
 			fn := args.Get(4).(func(pg.Queryer) error)
-			fn(nil)
+			require.NoError(t, fn(nil))
 		}).Once().Return(false, nil)
 
 		err := uni.service.Start(testutils.Context(t))
@@ -392,9 +403,10 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 	})
 
 	t.Run("Log has insufficient funds", func(t *testing.T) {
-		cfg := configtest.NewTestGeneralConfig(t)
-		cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
-		cfg.Overrides.GlobalMinimumContractPayment = assets.NewLinkFromJuels(100)
+		cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+			c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)
+			c.EVM[0].MinContractPayment = assets.NewLinkFromJuels(100)
+		})
 		uni := NewDirectRequestUniverseWithConfig(t, cfg, nil)
 		defer uni.Cleanup()
 
@@ -430,9 +442,10 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 
 	t.Run("requesters is specified and log is requested by a whitelisted address", func(t *testing.T) {
 		requester := testutils.NewAddress()
-		cfg := configtest.NewTestGeneralConfig(t)
-		cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
-		cfg.Overrides.GlobalMinimumContractPayment = assets.NewLinkFromJuels(100)
+		cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+			c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)
+			c.EVM[0].MinContractPayment = assets.NewLinkFromJuels(100)
+		})
 		uni := NewDirectRequestUniverseWithConfig(t, cfg, func(jb *job.Job) {
 			jb.DirectRequestSpec.Requesters = []common.Address{testutils.NewAddress(), requester}
 		})
@@ -466,7 +479,7 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		uni.runner.On("Run", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 			runBeganAwaiter.ItHappened()
 			fn := args.Get(4).(func(pg.Queryer) error)
-			fn(nil)
+			require.NoError(t, fn(nil))
 		}).Once().Return(false, nil)
 
 		err := uni.service.Start(testutils.Context(t))
@@ -487,9 +500,10 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 
 	t.Run("requesters is specified and log is requested by a non-whitelisted address", func(t *testing.T) {
 		requester := testutils.NewAddress()
-		cfg := configtest.NewTestGeneralConfig(t)
-		cfg.Overrides.GlobalMinIncomingConfirmations = null.IntFrom(1)
-		cfg.Overrides.GlobalMinimumContractPayment = assets.NewLinkFromJuels(100)
+		cfg := configtest.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+			c.EVM[0].MinIncomingConfirmations = ptr[uint32](1)
+			c.EVM[0].MinContractPayment = assets.NewLinkFromJuels(100)
+		})
 		uni := NewDirectRequestUniverseWithConfig(t, cfg, func(jb *job.Job) {
 			jb.DirectRequestSpec.Requesters = []common.Address{testutils.NewAddress(), testutils.NewAddress()}
 		})
@@ -526,3 +540,5 @@ func TestDelegate_ServicesListenerHandleLog(t *testing.T) {
 		uni.service.Close()
 	})
 }
+
+func ptr[T any](t T) *T { return &t }

@@ -11,9 +11,11 @@ import (
 
 	"github.com/smartcontractkit/sqlx"
 
+	"github.com/smartcontractkit/chainlink/core/bridges"
 	evmtypes "github.com/smartcontractkit/chainlink/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils"
+	configtest2 "github.com/smartcontractkit/chainlink/core/internal/testutils/configtest/v2"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
@@ -21,6 +23,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/services/job/mocks"
 	"github.com/smartcontractkit/chainlink/core/services/ocr"
 	"github.com/smartcontractkit/chainlink/core/services/pipeline"
+	"github.com/smartcontractkit/chainlink/core/services/srvctest"
 	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
@@ -51,7 +54,7 @@ func clearDB(t *testing.T, db *sqlx.DB) {
 func TestSpawner_CreateJobDeleteJob(t *testing.T) {
 	t.Parallel()
 
-	config := cltest.NewTestGeneralConfig(t)
+	config := configtest2.NewTestGeneralConfig(t)
 	db := pgtest.NewSqlxDB(t)
 	keyStore := cltest.NewKeyStore(t, db, config)
 	ethKeyStore := keyStore.Eth()
@@ -73,7 +76,7 @@ func TestSpawner_CreateJobDeleteJob(t *testing.T) {
 
 	t.Run("should respect its dependents", func(t *testing.T) {
 		lggr := logger.TestLogger(t)
-		orm := job.NewTestORM(t, db, cc, pipeline.NewORM(db, lggr, config), keyStore, config)
+		orm := NewTestORM(t, db, cc, pipeline.NewORM(db, lggr, config), bridges.NewORM(db, lggr, config), keyStore, config)
 		a := utils.NewDependentAwaiter()
 		a.AddDependents(1)
 		spawner := job.NewSpawner(orm, config, map[job.Type]job.Delegate{}, db, lggr, []utils.DependentAwaiter{a})
@@ -87,7 +90,7 @@ func TestSpawner_CreateJobDeleteJob(t *testing.T) {
 				result <- false
 			}
 		}()
-		spawner.Start(testutils.Context(t))
+		require.NoError(t, spawner.Start(testutils.Context(t)))
 		assert.True(t, <-result, "failed to signal to dependents")
 	})
 
@@ -96,13 +99,14 @@ func TestSpawner_CreateJobDeleteJob(t *testing.T) {
 		jobB := makeOCRJobSpec(t, address, bridge.Name.String(), bridge2.Name.String())
 
 		lggr := logger.TestLogger(t)
-		orm := job.NewTestORM(t, db, cc, pipeline.NewORM(db, lggr, config), keyStore, config)
+		orm := NewTestORM(t, db, cc, pipeline.NewORM(db, lggr, config), bridges.NewORM(db, lggr, config), keyStore, config)
 		eventuallyA := cltest.NewAwaiter()
 		serviceA1 := mocks.NewServiceCtx(t)
 		serviceA2 := mocks.NewServiceCtx(t)
 		serviceA1.On("Start", mock.Anything).Return(nil).Once()
 		serviceA2.On("Start", mock.Anything).Return(nil).Once().Run(func(mock.Arguments) { eventuallyA.ItHappened() })
-		dA := ocr.NewDelegate(nil, orm, nil, nil, nil, monitoringEndpoint, cc, logger.TestLogger(t), config)
+		mailMon := srvctest.Start(t, utils.NewMailboxMonitor(t.Name()))
+		dA := ocr.NewDelegate(nil, orm, nil, nil, nil, monitoringEndpoint, cc, logger.TestLogger(t), config, mailMon)
 		delegateA := &delegate{jobA.Type, []job.ServiceCtx{serviceA1, serviceA2}, 0, make(chan struct{}), dA}
 		eventuallyB := cltest.NewAwaiter()
 		serviceB1 := mocks.NewServiceCtx(t)
@@ -110,13 +114,13 @@ func TestSpawner_CreateJobDeleteJob(t *testing.T) {
 		serviceB1.On("Start", mock.Anything).Return(nil).Once()
 		serviceB2.On("Start", mock.Anything).Return(nil).Once().Run(func(mock.Arguments) { eventuallyB.ItHappened() })
 
-		dB := ocr.NewDelegate(nil, orm, nil, nil, nil, monitoringEndpoint, cc, logger.TestLogger(t), config)
+		dB := ocr.NewDelegate(nil, orm, nil, nil, nil, monitoringEndpoint, cc, logger.TestLogger(t), config, mailMon)
 		delegateB := &delegate{jobB.Type, []job.ServiceCtx{serviceB1, serviceB2}, 0, make(chan struct{}), dB}
 		spawner := job.NewSpawner(orm, config, map[job.Type]job.Delegate{
 			jobA.Type: delegateA,
 			jobB.Type: delegateB,
 		}, db, lggr, nil)
-		spawner.Start(testutils.Context(t))
+		require.NoError(t, spawner.Start(testutils.Context(t)))
 		err := spawner.CreateJob(jobA)
 		require.NoError(t, err)
 		jobSpecIDA := jobA.ID
@@ -158,8 +162,9 @@ func TestSpawner_CreateJobDeleteJob(t *testing.T) {
 		serviceA2.On("Start", mock.Anything).Return(nil).Once().Run(func(mock.Arguments) { eventually.ItHappened() })
 
 		lggr := logger.TestLogger(t)
-		orm := job.NewTestORM(t, db, cc, pipeline.NewORM(db, lggr, config), keyStore, config)
-		d := ocr.NewDelegate(nil, orm, nil, nil, nil, monitoringEndpoint, cc, logger.TestLogger(t), config)
+		orm := NewTestORM(t, db, cc, pipeline.NewORM(db, lggr, config), bridges.NewORM(db, lggr, config), keyStore, config)
+		mailMon := srvctest.Start(t, utils.NewMailboxMonitor(t.Name()))
+		d := ocr.NewDelegate(nil, orm, nil, nil, nil, monitoringEndpoint, cc, logger.TestLogger(t), config, mailMon)
 		delegateA := &delegate{jobA.Type, []job.ServiceCtx{serviceA1, serviceA2}, 0, nil, d}
 		spawner := job.NewSpawner(orm, config, map[job.Type]job.Delegate{
 			jobA.Type: delegateA,
@@ -169,7 +174,7 @@ func TestSpawner_CreateJobDeleteJob(t *testing.T) {
 		require.NoError(t, err)
 		delegateA.jobID = jobA.ID
 
-		spawner.Start(testutils.Context(t))
+		require.NoError(t, spawner.Start(testutils.Context(t)))
 
 		eventually.AwaitOrFail(t)
 		mock.AssertExpectationsForObjects(t, serviceA1, serviceA2)
@@ -192,8 +197,9 @@ func TestSpawner_CreateJobDeleteJob(t *testing.T) {
 		serviceA2.On("Start", mock.Anything).Return(nil).Once().Run(func(mock.Arguments) { eventuallyStart.ItHappened() })
 
 		lggr := logger.TestLogger(t)
-		orm := job.NewTestORM(t, db, cc, pipeline.NewORM(db, lggr, config), keyStore, config)
-		d := ocr.NewDelegate(nil, orm, nil, nil, nil, monitoringEndpoint, cc, logger.TestLogger(t), config)
+		orm := NewTestORM(t, db, cc, pipeline.NewORM(db, lggr, config), bridges.NewORM(db, lggr, config), keyStore, config)
+		mailMon := srvctest.Start(t, utils.NewMailboxMonitor(t.Name()))
+		d := ocr.NewDelegate(nil, orm, nil, nil, nil, monitoringEndpoint, cc, logger.TestLogger(t), config, mailMon)
 		delegateA := &delegate{jobA.Type, []job.ServiceCtx{serviceA1, serviceA2}, 0, nil, d}
 		spawner := job.NewSpawner(orm, config, map[job.Type]job.Delegate{
 			jobA.Type: delegateA,
@@ -204,7 +210,7 @@ func TestSpawner_CreateJobDeleteJob(t *testing.T) {
 		jobSpecIDA := jobA.ID
 		delegateA.jobID = jobSpecIDA
 
-		spawner.Start(testutils.Context(t))
+		require.NoError(t, spawner.Start(testutils.Context(t)))
 		defer spawner.Close()
 
 		eventuallyStart.AwaitOrFail(t)

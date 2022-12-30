@@ -15,10 +15,14 @@ install-git-hooks: ## Install git hooks.
 	git config core.hooksPath .githooks
 
 .PHONY: install-chainlink-autoinstall
-install-chainlink-autoinstall: | gomod install-chainlink ## Autoinstall chainlink.
+install-chainlink-autoinstall: | pnpmdep gomod install-chainlink ## Autoinstall chainlink.
 .PHONY: operator-ui-autoinstall
-operator-ui-autoinstall: | yarndep operator-ui ## Autoinstall frontend UI.
+operator-ui-autoinstall: | operator-ui ## Autoinstall frontend UI.
 
+.PHONY: pnpmdep
+pnpmdep: ## Install solidity contract dependencies through pnpm
+	(cd contracts && pnpm i)
+	
 .PHONY: gomod
 gomod: ## Ensure chainlink's go dependencies are installed.
 	@if [ -z "`which gencodec`" ]; then \
@@ -26,9 +30,10 @@ gomod: ## Ensure chainlink's go dependencies are installed.
 	fi || true
 	go mod download
 
-.PHONY: yarndep
-yarndep: ## Ensure all yarn dependencies are installed.
-	yarn install --frozen-lockfile --prefer-offline
+.PHONY: gomodtidy
+gomodtidy: ## Run go mod tidy on all modules.
+	go mod tidy
+	cd ./integration-tests && go mod tidy
 
 .PHONY: install-chainlink
 install-chainlink: chainlink ## Install the chainlink binary.
@@ -39,21 +44,21 @@ install-chainlink: chainlink ## Install the chainlink binary.
 chainlink: operator-ui ## Build the chainlink binary.
 	go build $(GOFLAGS) -o $@ ./core/
 
+.PHONY: docker ## Build the chainlink docker image
+docker:
+	docker buildx build \
+	--build-arg COMMIT_SHA=$(COMMIT_SHA) \
+	-f core/chainlink.Dockerfile .
+
 .PHONY: chainlink-build
-chainlink-build: ## Build & install the chainlink binary.
+chainlink-build: operator-ui ## Build & install the chainlink binary.
 	go build $(GOFLAGS) -o chainlink ./core/
 	rm -f $(GOBIN)/chainlink
 	cp chainlink $(GOBIN)/chainlink
 
 .PHONY: operator-ui
-operator-ui: ## Build the static frontend UI.
-	yarn setup:chainlink
-	CHAINLINK_VERSION="$(VERSION)@$(COMMIT_SHA)" yarn workspace @chainlink/operator-ui build
-
-.PHONY: contracts-operator-ui-build
-contracts-operator-ui-build: # Only compiles tsc and builds contracts and operator-ui.
-	yarn setup:chainlink
-	CHAINLINK_VERSION="$(VERSION)@$(COMMIT_SHA)" yarn workspace @chainlink/operator-ui build
+operator-ui: ## Fetch the frontend
+	./operator_ui/install.sh
 
 .PHONY: abigen
 abigen: ## Build & install abigen.
@@ -67,7 +72,16 @@ go-solidity-wrappers: abigen ## Recompiles solidity contracts and their go wrapp
 .PHONY: go-solidity-wrappers-ocr2vrf
 go-solidity-wrappers-ocr2vrf: abigen ## Recompiles solidity contracts and their go wrappers.
 	./contracts/scripts/native_solc_compile_all_ocr2vrf
+	# replace the go:generate_disabled directive with the regular go:generate directive
+	sed -i '' 's/go:generate_disabled/go:generate/g' core/gethwrappers/ocr2vrf/go_generate.go
 	go generate ./core/gethwrappers/ocr2vrf
+	go generate ./core/internal/mocks
+	# put the go:generate_disabled directive back
+	sed -i '' 's/go:generate/go:generate_disabled/g' core/gethwrappers/ocr2vrf/go_generate.go
+
+.PHONY: generate
+generate: abigen ## Execute all go:generate commands.
+	go generate -x ./...
 
 .PHONY: testdb
 testdb: ## Prepares the test database.
@@ -97,49 +111,31 @@ telemetry-protobuf: $(telemetry-protobuf) ## Generate telemetry protocol buffers
 	--go-wsrpc_opt=paths=source_relative \
 	./core/services/synchronization/telem/*.proto
 
-.PHONY: test_install_ginkgo
-test_install_ginkgo: ## Install ginkgo executable to run tests
-	go install github.com/onsi/ginkgo/v2/ginkgo@v$(shell cat ./.tool-versions | grep ginkgo | sed -En "s/ginkgo.(.*)/\1/p")
-
-.PHONY: test_smoke
-test_smoke: ## Run all integration smoke tests, using only simulated networks, default behavior
-	ginkgo -v -r --junit-report=tests-smoke-report.xml \
-	--keep-going --trace --randomize-all --randomize-suites \
-	--progress --focus @simulated $(args) ./integration-tests/smoke
-
-.PHONY: test_smoke_simulated
-test_smoke_simulated: ## Run all integration smoke tests, using only simulated networks, default behavior (you can use `make test_smoke`)
-	ginkgo -v -r --junit-report=tests-smoke-report.xml \
-	--keep-going --trace --randomize-all --randomize-suites \
-	--progress --focus @simulated $(args) ./integration-tests/smoke
-
-.PHONY: test_smoke_raw
-test_smoke_raw: ## Run ALL integration smoke tests, only used for when focusing a specific suite or test
-	ginkgo -v -r --junit-report=tests-smoke-report.xml \
-	--keep-going --trace --randomize-all --randomize-suites \
-	--progress $(args) ./integration-tests/smoke
-
-.PHONY: test_soak_ocr
-test_soak_ocr: ## Run the OCR soak test
-	cd ./integration-tests && go test -v -run ^TestOCRSoak$$ ./soak -count=1 && cd ..
-
-.PHONY: test_soak_keeper
-test_soak_keeper: ## Run the OCR soak test
-	cd ./integration-tests && go test -v -run ^TestKeeperSoak$$ ./soak -count=1 && cd ..
-
-.PHONY: test_perf
-test_perf: ## Run core node performance tests.
-	ginkgo -v -r --junit-report=tests-perf-report.xml \
-	--keep-going --trace --randomize-all --randomize-suites \
-	--progress $(args) ./integration-tests/performance
-
-.PHONY: test_chaos
-test_chaos: # run core node chaos tests.
-	ginkgo -r --focus @chaos --nodes 3 ./integration-tests/chaos
+.PHONY: test_need_operator_assets
+test_need_operator_assets: ## Add blank file in web assets if operator ui has not been built
+	[ -f "./core/web/assets/index.html" ] || mkdir ./core/web/assets && touch ./core/web/assets/index.html
 
 .PHONY: config-docs
-config-docs: # Generate core node configuration documentation
-	go run ./internal/config/docs/main.go > ./docs/CONFIG.md
+config-docs: ## Generate core node configuration documentation
+	go run ./core/config/v2/docs/cmd/generate/main.go -o ./docs/
+
+.PHONY: golangci-lint
+golangci-lint: ## Run golangci-lint for all issues.
+	docker run --rm -v $(shell pwd):/app -w /app golangci/golangci-lint:latest golangci-lint run --max-issues-per-linter 0 --max-same-issues 0 > golangci-lint-output.txt
+
+.PHONY: snapshot
+snapshot:
+	cd ./contracts && forge snapshot --match-test _gas
+
+GORELEASER_CONFIG ?= .goreleaser.yaml
+
+.PHONY: goreleaser-dev-build
+goreleaser-dev-build: ## Run goreleaser snapshot build
+	./tools/bin/goreleaser_wrapper build --snapshot --rm-dist --config ${GORELEASER_CONFIG}
+
+.PHONY: goreleaser-dev-release
+goreleaser-dev-release: ## run goreleaser snapshot release
+	./tools/bin/goreleaser_wrapper release --snapshot --rm-dist --config ${GORELEASER_CONFIG}
 
 help:
 	@echo ""

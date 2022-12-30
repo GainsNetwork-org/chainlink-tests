@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/big"
 	"os"
 
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -15,7 +14,6 @@ import (
 	"github.com/smartcontractkit/chainlink/core/assets"
 	"github.com/smartcontractkit/chainlink/core/chains/evm/gas"
 	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
 func main() {
@@ -27,26 +25,27 @@ func main() {
 	defer func() { _ = sync() }()
 	lggr.SetLogLevel(zapcore.DebugLevel)
 
-	withEstimator(context.Background(), lggr, url, func(e gas.Estimator) {
-		printGetLegacyGas(e, make([]byte, 10), 500_000, assets.GWei(1))
-		printGetLegacyGas(e, make([]byte, 10), 500_000, assets.GWei(1), gas.OptForceRefetch)
-		printGetLegacyGas(e, make([]byte, 10), max, assets.GWei(1))
+	ctx := context.Background()
+	withEstimator(ctx, logger.Sugared(lggr), url, func(e gas.Estimator) {
+		printGetLegacyGas(ctx, e, make([]byte, 10), 500_000, assets.GWei(1))
+		printGetLegacyGas(ctx, e, make([]byte, 10), 500_000, assets.GWei(1), gas.OptForceRefetch)
+		printGetLegacyGas(ctx, e, make([]byte, 10), max, assets.GWei(1))
 	})
 }
 
-func printGetLegacyGas(e gas.Estimator, calldata []byte, l2GasLimit uint32, maxGasPrice *big.Int, opts ...gas.Opt) {
-	price, limit, err := e.GetLegacyGas(calldata, l2GasLimit, maxGasPrice, opts...)
+func printGetLegacyGas(ctx context.Context, e gas.Estimator, calldata []byte, l2GasLimit uint32, maxGasPrice *assets.Wei, opts ...gas.Opt) {
+	price, limit, err := e.GetLegacyGas(ctx, calldata, l2GasLimit, maxGasPrice, opts...)
 	if err != nil {
 		log.Println("failed to get legacy gas:", err)
 		return
 	}
-	fmt.Println("Price:", (*utils.Wei)(price))
+	fmt.Println("Price:", price)
 	fmt.Println("Limit:", limit)
 }
 
 const max = 50_000_000
 
-func withEstimator(ctx context.Context, lggr logger.Logger, url string, f func(e gas.Estimator)) {
+func withEstimator(ctx context.Context, lggr logger.SugaredLogger, url string, f func(e gas.Estimator)) {
 	rc, err := rpc.Dial(url)
 	if err != nil {
 		log.Fatal(err)
@@ -59,7 +58,7 @@ func withEstimator(ctx context.Context, lggr logger.Logger, url string, f func(e
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer lggr.ErrorIfClosing(e, "ArbitrumEstimator")
+	defer lggr.ErrorIfFn(e.Close, "Error closing ArbitrumEstimator")
 
 	f(e)
 }

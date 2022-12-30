@@ -17,9 +17,13 @@ import (
 
 	evmconfigmocks "github.com/smartcontractkit/chainlink/core/chains/evm/config/mocks"
 	evmmocks "github.com/smartcontractkit/chainlink/core/chains/evm/mocks"
+	configtest2 "github.com/smartcontractkit/chainlink/core/internal/testutils/configtest/v2"
 	"github.com/smartcontractkit/chainlink/core/logger"
+	"github.com/smartcontractkit/chainlink/core/services/chainlink"
 	ocr2mocks "github.com/smartcontractkit/chainlink/core/services/ocr2/mocks"
 	"github.com/smartcontractkit/chainlink/core/services/ocr2/validate"
+	"github.com/smartcontractkit/chainlink/core/services/srvctest"
+	"github.com/smartcontractkit/chainlink/core/utils"
 
 	"github.com/smartcontractkit/chainlink/core/auth"
 	"github.com/smartcontractkit/chainlink/core/bridges"
@@ -63,16 +67,17 @@ func TestRunner(t *testing.T) {
 	ethClient.On("CallContract", mock.Anything, mock.Anything, mock.Anything).Maybe().Return(nil, nil)
 
 	pipelineORM := pipeline.NewORM(db, logger.TestLogger(t), config)
+	btORM := bridges.NewORM(db, logger.TestLogger(t), config)
 	cc := evmtest.NewChainSet(t, evmtest.TestChainOpts{DB: db, Client: ethClient, GeneralConfig: config})
 	c := clhttptest.NewTestLocalOnlyHTTPClient()
-	runner := pipeline.NewRunner(pipelineORM, config, cc, nil, nil, logger.TestLogger(t), c, c)
-	jobORM := job.NewTestORM(t, db, cc, pipelineORM, keyStore, config)
+	runner := pipeline.NewRunner(pipelineORM, btORM, config, cc, nil, nil, logger.TestLogger(t), c, c)
+	jobORM := NewTestORM(t, db, cc, pipelineORM, btORM, keyStore, config)
 
-	runner.Start(testutils.Context(t))
-	defer runner.Close()
+	require.NoError(t, runner.Start(testutils.Context(t)))
+	t.Cleanup(func() { assert.NoError(t, runner.Close()) })
 
 	_, transmitterAddress := cltest.MustInsertRandomKey(t, ethKeyStore, 0)
-	keyStore.OCR().Add(cltest.DefaultOCRKey)
+	require.NoError(t, keyStore.OCR().Add(cltest.DefaultOCRKey))
 
 	t.Run("gets the election result winner", func(t *testing.T) {
 		var httpURL string
@@ -453,6 +458,7 @@ ds1 -> ds1_parse;
 			cc,
 			logger.TestLogger(t),
 			config,
+			srvctest.Start(t, utils.NewMailboxMonitor(t.Name())),
 		)
 		_, err = sd.ServicesForSpec(jb)
 		// We expect this to fail as neither the required vars are not set either via the env nor the job itself.
@@ -492,6 +498,7 @@ ds1 -> ds1_parse;
 			cc,
 			lggr,
 			config,
+			srvctest.Start(t, utils.NewMailboxMonitor(t.Name())),
 		)
 		_, err = sd.ServicesForSpec(jb)
 		require.NoError(t, err)
@@ -546,6 +553,7 @@ ds1 -> ds1_parse;
 			cc,
 			lggr,
 			config,
+			srvctest.Start(t, utils.NewMailboxMonitor(t.Name())),
 		)
 		_, err = sd.ServicesForSpec(jb)
 		require.NoError(t, err)
@@ -581,6 +589,7 @@ ds1 -> ds1_parse;
 			cc,
 			lggr,
 			config,
+			srvctest.Start(t, utils.NewMailboxMonitor(t.Name())),
 		)
 		_, err = sd.ServicesForSpec(jb)
 		require.NoError(t, err)
@@ -610,6 +619,7 @@ ds1 -> ds1_parse;
 			cc,
 			lggr,
 			config,
+			srvctest.Start(t, utils.NewMailboxMonitor(t.Name())),
 		)
 		_, err = sd.ServicesForSpec(jb)
 		require.NoError(t, err)
@@ -643,6 +653,7 @@ ds1 -> ds1_parse;
 			cc,
 			lggr,
 			config,
+			srvctest.Start(t, utils.NewMailboxMonitor(t.Name())),
 		)
 		services, err := sd.ServicesForSpec(*jb)
 		require.NoError(t, err)
@@ -761,9 +772,11 @@ func TestRunner_Success_Callback_AsyncJob(t *testing.T) {
 
 	ethClient := cltest.NewEthMocksWithStartupAssertions(t)
 
-	cfg := cltest.NewTestGeneralConfig(t)
-	cfg.Overrides.FeatureExternalInitiators = null.BoolFrom(true)
-	cfg.Overrides.SetTriggerFallbackDBPollInterval(10 * time.Millisecond)
+	cfg := configtest2.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+		t := true
+		c.JobPipeline.ExternalInitiatorsEnabled = &t
+		c.Database.Listener.FallbackPollInterval = models.MustNewDuration(10 * time.Millisecond)
+	})
 
 	app := cltest.NewApplicationWithConfig(t, cfg, ethClient, cltest.UseRealExternalInitiatorManager)
 
@@ -896,7 +909,8 @@ func TestRunner_Success_Callback_AsyncJob(t *testing.T) {
 		_ = cltest.CreateJobRunViaExternalInitiatorV2(t, app, jobUUID, *eia, cltest.MustJSONMarshal(t, eiRequest))
 
 		pipelineORM := pipeline.NewORM(app.GetSqlxDB(), logger.TestLogger(t), cfg)
-		jobORM := job.NewTestORM(t, app.GetSqlxDB(), cc, pipelineORM, app.KeyStore, cfg)
+		bridgesORM := bridges.NewORM(app.GetSqlxDB(), logger.TestLogger(t), cfg)
+		jobORM := NewTestORM(t, app.GetSqlxDB(), cc, pipelineORM, bridgesORM, app.KeyStore, cfg)
 
 		// Trigger v2/resume
 		select {
@@ -938,9 +952,11 @@ func TestRunner_Error_Callback_AsyncJob(t *testing.T) {
 
 	ethClient := cltest.NewEthMocksWithStartupAssertions(t)
 
-	cfg := cltest.NewTestGeneralConfig(t)
-	cfg.Overrides.FeatureExternalInitiators = null.BoolFrom(true)
-	cfg.Overrides.SetTriggerFallbackDBPollInterval(10 * time.Millisecond)
+	cfg := configtest2.NewGeneralConfig(t, func(c *chainlink.Config, s *chainlink.Secrets) {
+		t := true
+		c.JobPipeline.ExternalInitiatorsEnabled = &t
+		c.Database.Listener.FallbackPollInterval = models.MustNewDuration(10 * time.Millisecond)
+	})
 
 	app := cltest.NewApplicationWithConfig(t, cfg, ethClient, cltest.UseRealExternalInitiatorManager)
 
@@ -1071,7 +1087,8 @@ func TestRunner_Error_Callback_AsyncJob(t *testing.T) {
 		_ = cltest.CreateJobRunViaExternalInitiatorV2(t, app, jobUUID, *eia, cltest.MustJSONMarshal(t, eiRequest))
 
 		pipelineORM := pipeline.NewORM(app.GetSqlxDB(), logger.TestLogger(t), cfg)
-		jobORM := job.NewTestORM(t, app.GetSqlxDB(), cc, pipelineORM, app.KeyStore, cfg)
+		bridgesORM := bridges.NewORM(app.GetSqlxDB(), logger.TestLogger(t), cfg)
+		jobORM := NewTestORM(t, app.GetSqlxDB(), cc, pipelineORM, bridgesORM, app.KeyStore, cfg)
 
 		// Trigger v2/resume
 		select {

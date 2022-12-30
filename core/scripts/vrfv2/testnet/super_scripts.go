@@ -26,12 +26,15 @@ type = "vrf"
 name = "vrf_v2"
 schemaVersion = 1
 coordinatorAddress = "%s"
+batchCoordinatorAddress = "%s"
+batchFulfillmentEnabled = %t
+batchFulfillmentGasMultiplier = 1.1
 publicKey = "%s"
 minIncomingConfirmations = 3
 evmChainID = "%d"
 fromAddresses = ["%s"]
 pollPeriod = "5s"
-requestTimeout = "24hr"
+requestTimeout = "24h"
 observationSource = """decode_log   [type=ethabidecodelog
               abi="RandomWordsRequested(bytes32 indexed keyHash,uint256 requestId,uint256 preSeed,uint64 indexed subId,uint16 minimumRequestConfirmations,uint32 callbackGasLimit,uint32 numWords,address indexed sender)"
               data="$(jobRun.logData)"
@@ -62,10 +65,10 @@ func deployUniverse(e helpers.Environment) {
 	// required flags
 	linkAddress := deployCmd.String("link-address", "", "address of link token")
 	linkEthAddress := deployCmd.String("link-eth-feed", "", "address of link eth feed")
-	subscriptionBalanceString := deployCmd.String("subscription-balance", assets.Ether(10).String(), "amount to fund subscription")
+	subscriptionBalanceString := deployCmd.String("subscription-balance", "1e19", "amount to fund subscription")
 
 	// optional flags
-	fallbackWeiPerUnitLinkString := deployCmd.String("fallback-wei-per-unit-link", assets.GWei(60_000_000).String(), "fallback wei/link ratio")
+	fallbackWeiPerUnitLinkString := deployCmd.String("fallback-wei-per-unit-link", "6e16", "fallback wei/link ratio")
 	registerKeyUncompressedPubKey := deployCmd.String("uncompressed-pub-key", "", "uncompressed public key")
 	registerKeyOracleAddress := deployCmd.String("oracle-address", "", "oracle sender address")
 	minConfs := deployCmd.Int("min-confs", 3, "min confs")
@@ -82,6 +85,7 @@ func deployUniverse(e helpers.Environment) {
 	reqsForTier3 := deployCmd.Int64("reqs-for-tier-3", 0, "requests for tier 3")
 	reqsForTier4 := deployCmd.Int64("reqs-for-tier-4", 0, "requests for tier 4")
 	reqsForTier5 := deployCmd.Int64("reqs-for-tier-5", 0, "requests for tier 5")
+	noCancelEnabled := deployCmd.Bool("no-cancel-enabled", false, "whether to deploy the no-cancel coordinator")
 
 	helpers.ParseArgs(
 		deployCmd, os.Args[2:],
@@ -131,8 +135,15 @@ func deployUniverse(e helpers.Environment) {
 	fmt.Println("\nDeploying Batch BHS...")
 	batchBHSAddress := deployBatchBHS(e, bhsContractAddress)
 
-	fmt.Println("\nDeploying Coordinator...")
-	coordinatorAddress := deployCoordinator(e, *linkAddress, bhsContractAddress.String(), *linkEthAddress)
+	var coordinatorAddress common.Address
+	if *noCancelEnabled {
+		fmt.Println("\nDeploying NoCancelCoordinator...")
+		coordinatorAddress = deployNoCancelCoordinator(e, *linkAddress, bhsContractAddress.String(), *linkEthAddress)
+	} else {
+		fmt.Println("\nDeploying Coordinator...")
+		coordinatorAddress = deployCoordinator(e, *linkAddress, bhsContractAddress.String(), *linkEthAddress)
+	}
+
 	coordinator, err := vrf_coordinator_v2.NewVRFCoordinatorV2(coordinatorAddress, e.Ec)
 	helpers.PanicErr(err)
 
@@ -206,6 +217,8 @@ func deployUniverse(e helpers.Environment) {
 	formattedJobSpec := fmt.Sprintf(
 		formattedVRFJob,
 		coordinatorAddress,
+		batchCoordinatorAddress,
+		false,
 		compressedPkHex,
 		e.ChainID,
 		*registerKeyOracleAddress,

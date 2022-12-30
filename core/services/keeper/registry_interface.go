@@ -12,6 +12,7 @@ import (
 	"github.com/pkg/errors"
 
 	evmclient "github.com/smartcontractkit/chainlink/core/chains/evm/client"
+	evmtypes "github.com/smartcontractkit/chainlink/core/chains/evm/types"
 	registry1_1 "github.com/smartcontractkit/chainlink/core/gethwrappers/generated/keeper_registry_wrapper1_1"
 	registry1_2 "github.com/smartcontractkit/chainlink/core/gethwrappers/generated/keeper_registry_wrapper1_2"
 	registry1_3 "github.com/smartcontractkit/chainlink/core/gethwrappers/generated/keeper_registry_wrapper1_3"
@@ -26,12 +27,15 @@ const (
 	RegistryVersion_1_1
 	RegistryVersion_1_2
 	RegistryVersion_1_3
+	RegistryVersion_2_0
 )
 
 func (rv RegistryVersion) String() string {
 	switch rv {
 	case RegistryVersion_1_0, RegistryVersion_1_1, RegistryVersion_1_2, RegistryVersion_1_3:
 		return fmt.Sprintf("v1.%d", rv)
+	case RegistryVersion_2_0:
+		return "v2.0"
 	default:
 		return "unknown registry version"
 	}
@@ -53,13 +57,13 @@ type RegistryWrapper struct {
 	contract1_1 *registry1_1.KeeperRegistry
 	contract1_2 *registry1_2.KeeperRegistry
 	contract1_3 *registry1_3.KeeperRegistry
-	evmClient   bind.ContractBackend
+	evmClient   evmclient.Client
 }
 
-func NewRegistryWrapper(address ethkey.EIP55Address, backend bind.ContractBackend) (*RegistryWrapper, error) {
+func NewRegistryWrapper(address ethkey.EIP55Address, evmClient evmclient.Client) (*RegistryWrapper, error) {
 	interface_wrapper, err := type_and_version.NewTypeAndVersionInterface(
 		address.Address(),
-		backend,
+		evmClient,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to create type and interface wrapper")
@@ -71,21 +75,21 @@ func NewRegistryWrapper(address ethkey.EIP55Address, backend bind.ContractBacken
 
 	contract1_1, err := registry1_1.NewKeeperRegistry(
 		address.Address(),
-		backend,
+		evmClient,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to create keeper registry 1_1 contract wrapper")
 	}
 	contract1_2, err := registry1_2.NewKeeperRegistry(
 		address.Address(),
-		backend,
+		evmClient,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to create keeper registry 1_2 contract wrapper")
 	}
 	contract1_3, err := registry1_3.NewKeeperRegistry(
 		address.Address(),
-		backend,
+		evmClient,
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to create keeper registry 1_3 contract wrapper")
@@ -97,14 +101,14 @@ func NewRegistryWrapper(address ethkey.EIP55Address, backend bind.ContractBacken
 		contract1_1: contract1_1,
 		contract1_2: contract1_2,
 		contract1_3: contract1_3,
-		evmClient:   backend,
+		evmClient:   evmClient,
 	}, nil
 }
 
 func getRegistryVersion(contract *type_and_version.TypeAndVersionInterface) (*RegistryVersion, error) {
 	typeAndVersion, err := contract.TypeAndVersion(nil)
 	if err != nil {
-		jsonErr := evmclient.ExtractRPCError(err)
+		jsonErr := evmclient.ExtractRPCErrorOrNil(err)
 		if jsonErr != nil {
 			// Version 1.0 does not support typeAndVersion interface, hence gives a json error on this call
 			version := RegistryVersion_1_0
@@ -159,17 +163,17 @@ func (rw *RegistryWrapper) getUpkeepCount(opts *bind.CallOpts) (*big.Int, error)
 
 func (rw *RegistryWrapper) GetActiveUpkeepIDs(opts *bind.CallOpts) ([]*big.Int, error) {
 	if opts == nil || opts.BlockNumber.Int64() == 0 {
-		var header *types.Header
+		var head *evmtypes.Head
 		// fetch the current block number so batched GetActiveUpkeepIDs calls can be performed on the same block
-		header, err := rw.evmClient.HeaderByNumber(context.Background(), nil)
+		head, err := rw.evmClient.HeadByNumber(context.Background(), nil)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to fetch EVM block header")
 		}
 		if opts != nil {
-			opts.BlockNumber = header.Number
+			opts.BlockNumber = big.NewInt(head.Number)
 		} else {
 			opts = &bind.CallOpts{
-				BlockNumber: header.Number,
+				BlockNumber: big.NewInt(head.Number),
 			}
 		}
 	}

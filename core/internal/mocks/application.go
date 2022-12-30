@@ -5,7 +5,10 @@ package mocks
 import (
 	big "math/big"
 
+	audit "github.com/smartcontractkit/chainlink/core/logger/audit"
+
 	bridges "github.com/smartcontractkit/chainlink/core/bridges"
+
 	chainlink "github.com/smartcontractkit/chainlink/core/services/chainlink"
 
 	config "github.com/smartcontractkit/chainlink/core/config"
@@ -129,6 +132,22 @@ func (_m *Application) EVMORM() types.ORM {
 	return r0
 }
 
+// GetAuditLogger provides a mock function with given fields:
+func (_m *Application) GetAuditLogger() audit.AuditLogger {
+	ret := _m.Called()
+
+	var r0 audit.AuditLogger
+	if rf, ok := ret.Get(0).(func() audit.AuditLogger); ok {
+		r0 = rf()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(audit.AuditLogger)
+		}
+	}
+
+	return r0
+}
+
 // GetChains provides a mock function with given fields:
 func (_m *Application) GetChains() chainlink.Chains {
 	ret := _m.Called()
@@ -240,15 +259,15 @@ func (_m *Application) GetKeyStore() keystore.Master {
 }
 
 // GetLogger provides a mock function with given fields:
-func (_m *Application) GetLogger() logger.Logger {
+func (_m *Application) GetLogger() logger.SugaredLogger {
 	ret := _m.Called()
 
-	var r0 logger.Logger
-	if rf, ok := ret.Get(0).(func() logger.Logger); ok {
+	var r0 logger.SugaredLogger
+	if rf, ok := ret.Get(0).(func() logger.SugaredLogger); ok {
 		r0 = rf()
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(logger.Logger)
+			r0 = ret.Get(0).(logger.SugaredLogger)
 		}
 	}
 

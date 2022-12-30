@@ -11,7 +11,10 @@ import (
 	ocrConfigHelper "github.com/smartcontractkit/libocr/offchainreporting/confighelper"
 	ocrConfigHelper2 "github.com/smartcontractkit/libocr/offchainreporting2/confighelper"
 
+	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/operator_factory"
+
 	"github.com/smartcontractkit/chainlink-testing-framework/contracts/ethereum"
+
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 )
 
@@ -133,13 +136,14 @@ type OffchainAggregator interface {
 	Address() string
 	Fund(nativeAmount *big.Float) error
 	GetContractData(ctx context.Context) (*OffchainAggregatorData, error)
-	SetConfig(chainlinkNodes []*client.Chainlink, ocrConfig OffChainAggregatorConfig) error
+	SetConfig(chainlinkNodes []*client.Chainlink, ocrConfig OffChainAggregatorConfig, transmitters []common.Address) error
 	SetPayees([]string, []string) error
 	RequestNewRound() error
 	GetLatestAnswer(ctx context.Context) (*big.Int, error)
 	GetLatestRound(ctx context.Context) (*RoundData, error)
 	GetRound(ctx context.Context, roundID *big.Int) (*RoundData, error)
 	ParseEventAnswerUpdated(log types.Log) (*ethereum.OffchainAggregatorAnswerUpdated, error)
+	LatestRoundDataUpdatedAt() (*big.Int, error)
 }
 
 type Oracle interface {
@@ -183,6 +187,7 @@ type JobByInstance struct {
 type MockETHLINKFeed interface {
 	Address() string
 	LatestRoundData() (*big.Int, error)
+	LatestRoundDataUpdatedAt() (*big.Int, error)
 }
 
 type MockGasFeed interface {
@@ -241,6 +246,17 @@ type VRFConsumerV2 interface {
 	Fund(ethAmount *big.Float) error
 }
 
+type Staking interface {
+	Address() string
+	Fund(ethAmount *big.Float) error
+	AddOperators(operators []common.Address) error
+	RemoveOperators(operators []common.Address) error
+	SetFeedOperators(operators []common.Address) error
+	RaiseAlert() error
+	Start(amount *big.Int, initialRewardRate *big.Int) error
+	SetMerkleRoot(newMerkleRoot [32]byte) error
+}
+
 type RoundData struct {
 	RoundId         *big.Int
 	Answer          *big.Int
@@ -275,4 +291,25 @@ type PerfEvent struct {
 	Round          *big.Int
 	RequestID      [32]byte
 	BlockTimestamp *big.Int
+}
+
+// OperatorFactory creates Operator contracts for node operators
+type OperatorFactory interface {
+	Address() string
+	DeployNewOperatorAndForwarder() (*types.Transaction, error)
+	ParseAuthorizedForwarderCreated(log types.Log) (*operator_factory.OperatorFactoryAuthorizedForwarderCreated, error)
+	ParseOperatorCreated(log types.Log) (*operator_factory.OperatorFactoryOperatorCreated, error)
+}
+
+// Operator operates forwarders
+type Operator interface {
+	Address() string
+	AcceptAuthorizedReceivers(forwarders []common.Address, eoa []common.Address) error
+}
+
+// AuthorizedForwarder forward requests from cll nodes eoa
+type AuthorizedForwarder interface {
+	Address() string
+	Owner(ctx context.Context) (string, error)
+	GetAuthorizedSenders(ctx context.Context) ([]string, error)
 }
