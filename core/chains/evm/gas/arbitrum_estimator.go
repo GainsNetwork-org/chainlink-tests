@@ -117,7 +117,7 @@ func (a *arbitrumEstimator) GetLegacyGas(ctx context.Context, calldata []byte, l
 			}
 		}
 		perL2Tx, perL1CalldataUnit := a.getPricesInArbGas()
-		chainSpecificGasLimit = l2GasLimit + perL2Tx + uint32(len(calldata))*perL1CalldataUnit
+		chainSpecificGasLimit = (l2GasLimit + perL2Tx + uint32(len(calldata))*perL1CalldataUnit)*4
 		a.logger.Debugw("GetLegacyGas", "l2GasLimit", l2GasLimit, "calldataLen", len(calldata), "perL2Tx", perL2Tx,
 			"perL1CalldataUnit", perL1CalldataUnit, "chainSpecificGasLimit", chainSpecificGasLimit)
 	})
