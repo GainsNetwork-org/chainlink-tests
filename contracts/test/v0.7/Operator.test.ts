@@ -29,6 +29,7 @@ import {
   encodeOracleRequest,
   encodeRequestOracleData,
   RunRequest,
+  convertFufillShortParams,
 } from '../test-helpers/oracle'
 
 let v7ConsumerFactory: ContractFactory
@@ -118,6 +119,7 @@ describe('Operator', () => {
       'cancelOracleRequestByRequester',
       'distributeFunds',
       'fulfillOracleRequest',
+      'fulfillOracleRequestShort',
       'fulfillOracleRequest2',
       'getAuthorizedSenders',
       'getChainlinkToken',
@@ -1005,6 +1007,454 @@ describe('Operator', () => {
               '0x',
             ),
         )
+      })
+    })
+  })
+
+  describe('#fulfillOracleRequestShort', () => {
+    const response = 'Hi Mom!'
+    let maliciousRequester: Contract
+    let basicConsumer: Contract
+    let maliciousConsumer: Contract
+    let gasGuzzlingConsumer: Contract
+    let request: ReturnType<typeof decodeRunRequest>
+
+    describe('gas guzzling consumer [ @skip-coverage ]', () => {
+      beforeEach(async () => {
+        gasGuzzlingConsumer = await gasGuzzlingConsumerFactory
+          .connect(roles.consumer)
+          .deploy(link.address, operator.address, specId)
+        const paymentAmount = toWei('1')
+        await link.transfer(gasGuzzlingConsumer.address, paymentAmount)
+        const tx = await gasGuzzlingConsumer.gassyRequestEthereumPrice(
+          paymentAmount,
+        )
+        const receipt = await tx.wait()
+        request = decodeRunRequest(receipt.logs?.[3])
+      })
+
+      it('emits an OracleResponse event', async () => {
+        const fulfillParams = convertFufillShortParams(request, response)
+        const tx = await operator
+          .connect(roles.oracleNode)
+          .fulfillOracleRequestShort(...fulfillParams)
+        const receipt = await tx.wait()
+        assert.equal(receipt.events?.length, 1)
+        const responseEvent = receipt.events?.[0]
+        assert.equal(responseEvent?.event, 'OracleResponse')
+        assert.equal(responseEvent?.args?.[0], request.requestId)
+      })
+    })
+
+    describe('cooperative consumer', () => {
+      beforeEach(async () => {
+        basicConsumer = await basicConsumerFactory
+          .connect(roles.defaultAccount)
+          .deploy(link.address, operator.address, specId)
+        const paymentAmount = toWei('1')
+        await link.transfer(basicConsumer.address, paymentAmount)
+        const currency = 'USD'
+        const tx = await basicConsumer.requestEthereumPrice(
+          currency,
+          paymentAmount,
+        )
+        const receipt = await tx.wait()
+        request = decodeRunRequest(receipt.logs?.[3])
+      })
+
+      describe('when called by an unauthorized node', () => {
+        beforeEach(async () => {
+          assert.equal(
+            false,
+            await operator.isAuthorizedSender(
+              await roles.stranger.getAddress(),
+            ),
+          )
+        })
+
+        it('raises an error', async () => {
+          await evmRevert(
+            operator
+              .connect(roles.stranger)
+              .fulfillOracleRequestShort(
+                ...convertFufillShortParams(request, response),
+              ),
+          )
+        })
+      })
+
+      describe('when fulfilled with the wrong function', () => {
+        let v7Consumer
+        beforeEach(async () => {
+          v7Consumer = await v7ConsumerFactory
+            .connect(roles.defaultAccount)
+            .deploy(link.address, operator.address, specId)
+          const paymentAmount = toWei('1')
+          await link.transfer(v7Consumer.address, paymentAmount)
+          const currency = 'USD'
+          const tx = await v7Consumer.requestEthereumPrice(
+            currency,
+            paymentAmount,
+          )
+          const receipt = await tx.wait()
+          request = decodeRunRequest(receipt.logs?.[3])
+        })
+
+        it('raises an error', async () => {
+          await evmRevert(
+            operator
+              .connect(roles.stranger)
+              .fulfillOracleRequestShort(
+                ...convertFufillShortParams(request, response),
+              ),
+          )
+        })
+      })
+
+      describe('when called by an authorized node', () => {
+        it('raises an error if the request ID does not exist', async () => {
+          request.requestId = ethers.utils.formatBytes32String('DOESNOTEXIST')
+          await evmRevert(
+            operator
+              .connect(roles.oracleNode)
+              .fulfillOracleRequestShort(
+                ...convertFufillShortParams(request, response),
+              ),
+          )
+        })
+
+        it('sets the value on the requested contract', async () => {
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+
+          const currentValue = await basicConsumer.currentPrice()
+          assert.equal(response, ethers.utils.parseBytes32String(currentValue))
+        })
+
+        it('emits an OracleResponse event', async () => {
+          const fulfillParams = convertFufillShortParams(request, response)
+          const tx = await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(...fulfillParams)
+          const receipt = await tx.wait()
+          assert.equal(receipt.events?.length, 3)
+          const responseEvent = receipt.events?.[0]
+          assert.equal(responseEvent?.event, 'OracleResponse')
+          assert.equal(responseEvent?.args?.[0], request.requestId)
+        })
+
+        it('does not allow a request to be fulfilled twice', async () => {
+          const response2 = response + ' && Hello World!!'
+
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+
+          await evmRevert(
+            operator
+              .connect(roles.oracleNode)
+              .fulfillOracleRequestShort(
+                ...convertFufillShortParams(request, response2),
+              ),
+          )
+
+          const currentValue = await basicConsumer.currentPrice()
+          assert.equal(response, ethers.utils.parseBytes32String(currentValue))
+        })
+      })
+
+      describe('when the oracle does not provide enough gas', () => {
+        // if updating this defaultGasLimit, be sure it matches with the
+        // defaultGasLimit specified in store/tx_manager.go
+        const defaultGasLimit = 500000
+
+        beforeEach(async () => {
+          bigNumEquals(0, await operator.withdrawable())
+        })
+
+        it('does not allow the oracle to withdraw the payment', async () => {
+          await evmRevert(
+            operator.connect(roles.oracleNode).fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response, {
+                gasLimit: 70000,
+              }),
+            ),
+          )
+
+          bigNumEquals(0, await operator.withdrawable())
+        })
+
+        it(`${defaultGasLimit} is enough to pass the gas requirement`, async () => {
+          await operator.connect(roles.oracleNode).fulfillOracleRequestShort(
+            ...convertFufillShortParams(request, response, {
+              gasLimit: defaultGasLimit,
+            }),
+          )
+
+          bigNumEquals(request.payment, await operator.withdrawable())
+        })
+      })
+    })
+
+    describe('with a malicious requester', () => {
+      beforeEach(async () => {
+        const paymentAmount = toWei('1')
+        maliciousRequester = await maliciousRequesterFactory
+          .connect(roles.defaultAccount)
+          .deploy(link.address, operator.address)
+        await link.transfer(maliciousRequester.address, paymentAmount)
+      })
+
+      it('cannot cancel before the expiration', async () => {
+        await evmRevert(
+          maliciousRequester.maliciousRequestCancel(
+            specId,
+            ethers.utils.toUtf8Bytes('doesNothing(bytes32,bytes32)'),
+          ),
+        )
+      })
+
+      it('cannot call functions on the LINK token through callbacks', async () => {
+        await evmRevert(
+          maliciousRequester.request(
+            specId,
+            link.address,
+            ethers.utils.toUtf8Bytes('transfer(address,uint256)'),
+          ),
+        )
+      })
+
+      describe('requester lies about amount of LINK sent', () => {
+        it('the oracle uses the amount of LINK actually paid', async () => {
+          const tx = await maliciousRequester.maliciousPrice(specId)
+          const receipt = await tx.wait()
+          const req = decodeRunRequest(receipt.logs?.[3])
+
+          assert(toWei('1').eq(req.payment))
+        })
+      })
+    })
+
+    describe('with a malicious consumer', () => {
+      const paymentAmount = toWei('1')
+
+      beforeEach(async () => {
+        maliciousConsumer = await maliciousConsumerFactory
+          .connect(roles.defaultAccount)
+          .deploy(link.address, operator.address)
+        await link.transfer(maliciousConsumer.address, paymentAmount)
+      })
+
+      describe('fails during fulfillment', () => {
+        beforeEach(async () => {
+          const tx = await maliciousConsumer.requestData(
+            specId,
+            ethers.utils.toUtf8Bytes('assertFail(bytes32,bytes32)'),
+          )
+          const receipt = await tx.wait()
+          request = decodeRunRequest(receipt.logs?.[3])
+        })
+
+        it('allows the oracle node to receive their payment', async () => {
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+
+          const balance = await link.balanceOf(
+            await roles.oracleNode.getAddress(),
+          )
+          bigNumEquals(balance, 0)
+
+          await operator
+            .connect(roles.defaultAccount)
+            .withdraw(await roles.oracleNode.getAddress(), paymentAmount)
+
+          const newBalance = await link.balanceOf(
+            await roles.oracleNode.getAddress(),
+          )
+          bigNumEquals(paymentAmount, newBalance)
+        })
+
+        it("can't fulfill the data again", async () => {
+          const response2 = 'hack the planet 102'
+
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+
+          await evmRevert(
+            operator
+              .connect(roles.oracleNode)
+              .fulfillOracleRequestShort(
+                ...convertFufillShortParams(request, response2),
+              ),
+          )
+        })
+      })
+
+      describe('calls selfdestruct', () => {
+        beforeEach(async () => {
+          const tx = await maliciousConsumer.requestData(
+            specId,
+            ethers.utils.toUtf8Bytes('doesNothing(bytes32,bytes32)'),
+          )
+          const receipt = await tx.wait()
+          request = decodeRunRequest(receipt.logs?.[3])
+          await maliciousConsumer.remove()
+        })
+
+        it('allows the oracle node to receive their payment', async () => {
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+
+          const balance = await link.balanceOf(
+            await roles.oracleNode.getAddress(),
+          )
+          bigNumEquals(balance, 0)
+
+          await operator
+            .connect(roles.defaultAccount)
+            .withdraw(await roles.oracleNode.getAddress(), paymentAmount)
+          const newBalance = await link.balanceOf(
+            await roles.oracleNode.getAddress(),
+          )
+          bigNumEquals(paymentAmount, newBalance)
+        })
+      })
+
+      describe('request is canceled during fulfillment', () => {
+        beforeEach(async () => {
+          const tx = await maliciousConsumer.requestData(
+            specId,
+            ethers.utils.toUtf8Bytes('cancelRequestOnFulfill(bytes32,bytes32)'),
+          )
+          const receipt = await tx.wait()
+          request = decodeRunRequest(receipt.logs?.[3])
+
+          bigNumEquals(0, await link.balanceOf(maliciousConsumer.address))
+        })
+
+        it('allows the oracle node to receive their payment', async () => {
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+
+          const mockBalance = await link.balanceOf(maliciousConsumer.address)
+          bigNumEquals(mockBalance, 0)
+
+          const balance = await link.balanceOf(
+            await roles.oracleNode.getAddress(),
+          )
+          bigNumEquals(balance, 0)
+
+          await operator
+            .connect(roles.defaultAccount)
+            .withdraw(await roles.oracleNode.getAddress(), paymentAmount)
+          const newBalance = await link.balanceOf(
+            await roles.oracleNode.getAddress(),
+          )
+          bigNumEquals(paymentAmount, newBalance)
+        })
+
+        it("can't fulfill the data again", async () => {
+          const response2 = 'hack the planet 102'
+
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+
+          await evmRevert(
+            operator
+              .connect(roles.oracleNode)
+              .fulfillOracleRequestShort(
+                ...convertFufillShortParams(request, response2),
+              ),
+          )
+        })
+      })
+
+      describe('tries to steal funds from node', () => {
+        it('is not successful with call', async () => {
+          const tx = await maliciousConsumer.requestData(
+            specId,
+            ethers.utils.toUtf8Bytes('stealEthCall(bytes32,bytes32)'),
+          )
+          const receipt = await tx.wait()
+          request = decodeRunRequest(receipt.logs?.[3])
+
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+
+          bigNumEquals(
+            0,
+            await ethers.provider.getBalance(maliciousConsumer.address),
+          )
+        })
+
+        it('is not successful with send', async () => {
+          const tx = await maliciousConsumer.requestData(
+            specId,
+            ethers.utils.toUtf8Bytes('stealEthSend(bytes32,bytes32)'),
+          )
+          const receipt = await tx.wait()
+          request = decodeRunRequest(receipt.logs?.[3])
+
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+          bigNumEquals(
+            0,
+            await ethers.provider.getBalance(maliciousConsumer.address),
+          )
+        })
+
+        it('is not successful with transfer', async () => {
+          const tx = await maliciousConsumer.requestData(
+            specId,
+            ethers.utils.toUtf8Bytes('stealEthTransfer(bytes32,bytes32)'),
+          )
+          const receipt = await tx.wait()
+          request = decodeRunRequest(receipt.logs?.[3])
+
+          await operator
+            .connect(roles.oracleNode)
+            .fulfillOracleRequestShort(
+              ...convertFufillShortParams(request, response),
+            )
+          bigNumEquals(
+            0,
+            await ethers.provider.getBalance(maliciousConsumer.address),
+          )
+        })
+      })
+
+      describe('when calling an owned contract', () => {
+        beforeEach(async () => {
+          forwarder1 = await forwarderFactory
+            .connect(roles.defaultAccount)
+            .deploy(link.address, link.address, operator.address, '0x')
+        })
       })
     })
   })

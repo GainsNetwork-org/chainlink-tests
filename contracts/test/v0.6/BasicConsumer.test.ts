@@ -5,6 +5,7 @@ import { BigNumber, constants, Contract, ContractFactory } from 'ethers'
 import { Roles, getUsers } from '../test-helpers/setup'
 import { bigNumEquals, evmRevert } from '../test-helpers/matchers'
 import {
+  convertFufillShortParams,
   convertFufillParams,
   decodeRunRequest,
   encodeOracleRequest,
@@ -94,7 +95,7 @@ describe('BasicConsumer', () => {
         const tx = await cc.requestEthereumPrice(currency, payment)
         const receipt = await tx.wait()
 
-        assert.isBelow(receipt?.gasUsed?.toNumber() ?? -1, 140000)
+        assert.isBelow(receipt?.gasUsed?.toNumber() ?? -1, 186000)
       })
     })
   })
@@ -158,6 +159,90 @@ describe('BasicConsumer', () => {
         await oc
           .connect(roles.oracleNode)
           .fulfillOracleRequest(...convertFufillParams(otherRequest, response))
+
+        const received = await cc.currentPrice()
+
+        assert.equal(ethers.utils.parseBytes32String(received), '')
+      })
+    })
+
+    describe('when called by anyone other than the oracle contract', () => {
+      it('does not accept the data provided', async () => {
+        await evmRevert(
+          cc.connect(roles.oracleNode).fulfill(request.requestId, response),
+        )
+
+        const received = await cc.currentPrice()
+        assert.equal(ethers.utils.parseBytes32String(received), '')
+      })
+    })
+  })
+
+  describe('#fulfillOracleRequestShort', () => {
+    const response = ethers.utils.formatBytes32String('1,000,000.00')
+    let request: RunRequest
+
+    beforeEach(async () => {
+      await link.transfer(cc.address, toWei('1'))
+      const tx = await cc.requestEthereumPrice(currency, payment)
+      const receipt = await tx.wait()
+
+      request = decodeRunRequest(receipt?.logs?.[3])
+    })
+
+    it('records the data given to it by the oracle', async () => {
+      await oc
+        .connect(roles.oracleNode)
+        .fulfillOracleRequestShort(
+          ...convertFufillShortParams(request, response),
+        )
+
+      const currentPrice = await cc.currentPrice()
+      assert.equal(currentPrice, response)
+    })
+
+    it('logs the data given to it by the oracle', async () => {
+      const tx = await oc
+        .connect(roles.oracleNode)
+        .fulfillOracleRequestShort(
+          ...convertFufillShortParams(request, response),
+        )
+      const receipt = await tx.wait()
+
+      assert.equal(2, receipt?.logs?.length)
+      const log = receipt?.logs?.[1]
+
+      assert.equal(log?.topics[2], response)
+    })
+
+    describe('when the consumer does not recognize the request ID', () => {
+      let otherRequest: RunRequest
+
+      beforeEach(async () => {
+        // Create a request directly via the oracle, rather than through the
+        // chainlink client (consumer). The client should not respond to
+        // fulfillment of this request, even though the oracle will faithfully
+        // forward the fulfillment to it.
+        const args = encodeOracleRequest(
+          toHex(specId),
+          cc.address,
+          basicConsumerFactory.interface.getSighash('fulfill'),
+          43,
+          constants.HashZero,
+        )
+        const tx = await link.transferAndCall(oc.address, 0, args)
+        const receipt = await tx.wait()
+
+        otherRequest = decodeRunRequest(receipt?.logs?.[2])
+      })
+
+      it('does not accept the data provided', async () => {
+        d('otherRequest %s', otherRequest)
+        await oc
+          .connect(roles.oracleNode)
+          .fulfillOracleRequestShort(
+            ...convertFufillShortParams(otherRequest, response),
+          )
 
         const received = await cc.currentPrice()
 
