@@ -143,6 +143,24 @@ export function convertFufillParams(
   ]
 }
 
+export function convertFufillShortParams(
+  runRequest: RunRequest,
+  response: string,
+  txOpts: TxOptions = {},
+): [string, string, TxOptions] {
+  const d = debug.extend('fulfillOracleRequestParams')
+  d('Response param: %s', response)
+
+  const bytes32Len = 32 * 2 + 2
+  const convertedResponse =
+    response.length < bytes32Len
+      ? ethers.utils.formatBytes32String(response)
+      : response
+  d('Converted Response param: %s', convertedResponse)
+
+  return [runRequest.requestId, convertedResponse, txOpts]
+}
+
 /**
  * Convert the javascript format of the parameters needed to call the
  * ```solidity
