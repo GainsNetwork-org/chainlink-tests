@@ -41,6 +41,17 @@ contract Operator is AuthorizedReceiver, ConfirmedOwner, LinkTokenReceiver, Oper
   LinkTokenInterface internal immutable linkToken;
   mapping(bytes32 => Commitment) private s_commitments;
   mapping(address => bool) private s_owned;
+
+  // Struct packed into 2 slots
+  // (cannot pack into 1 because we need payment to be > uint72 and expiration uint32)
+  struct PackedOracleRequest {
+    address callbackAddress; // slot1: 160
+    bytes4 callbackFunctionId; // slot1: 160 + 32
+    uint128 payment; // slot2: 128
+    uint128 expiration; // slot2: 128 + 128
+  }
+  mapping(bytes32 => PackedOracleRequest) private s_packedRequests;
+
   // Tokens sent for requests that have not been fulfilled yet
   uint256 private s_tokensInEscrow = ONE_FOR_CONSISTENT_GAS_COST;
 
@@ -113,6 +124,12 @@ contract Operator is AuthorizedReceiver, ConfirmedOwner, LinkTokenReceiver, Oper
       nonce,
       dataVersion
     );
+    s_packedRequests[requestId] = PackedOracleRequest(
+      callbackAddress,
+      callbackFunctionId,
+      uint128(payment),
+      uint128(expiration)
+    );
     emit OracleRequest(specId, sender, requestId, payment, sender, callbackFunctionId, expiration, dataVersion, data);
   }
 
@@ -183,6 +200,46 @@ contract Operator is AuthorizedReceiver, ConfirmedOwner, LinkTokenReceiver, Oper
     // callback(addr+functionId) as it is untrusted.
     // See: https://solidity.readthedocs.io/en/develop/security-considerations.html#use-the-checks-effects-interactions-pattern
     (bool success, ) = callbackAddress.call(abi.encodeWithSelector(callbackFunctionId, requestId, data)); // solhint-disable-line avoid-low-level-calls
+    return success;
+  }
+
+  /**
+   * @notice Called by the Chainlink node to fulfill requests
+   * @dev Matches functionality of fulfillOracleRequest with the exception of
+   * loading _payment, _callbackAddress, _callbackFunctionId and _expiration from
+   * storage. Ideal for L2's that charge for L1 calldata.
+   * Given params must hash back to the commitment stored from `oracleRequest`.
+   * Will call the callback address' callback function without bubbling up error
+   * checking in a `require` so that the node can get paid.
+   * @param requestId The fulfillment request ID that must match the requester's
+   * @param data The data to return to the consuming contract
+   * @return Status if the external call was successful
+   */
+  function fulfillOracleRequestShort(
+    bytes32 requestId,
+    bytes32 data
+  )
+    external
+    validateAuthorizedSender
+    validateRequestId(requestId)
+    returns (bool)
+  {
+    PackedOracleRequest memory request = s_packedRequests[requestId];
+
+    // WARNING: DO NOT REMOVE THIS CHECK
+    // This check replaces the validateCallbackAddress modifier as callbackAddress is only know after reading storage
+    require(!s_owned[request.callbackAddress], "Cannot call owned contract");
+
+
+    // Code below should always be the same as fulfillOracleRequest
+    _verifyOracleRequestAndProcessPayment(requestId, request.payment, request.callbackAddress, request.callbackFunctionId, request.expiration, 1);
+    emit OracleResponse(requestId);
+    require(gasleft() >= MINIMUM_CONSUMER_GAS_LIMIT, "Must provide consumer enough gas");
+
+    // All updates to the oracle's fulfillment should come before calling the
+    // callback(addr+functionId) as it is untrusted.
+    // See: https://solidity.readthedocs.io/en/develop/security-considerations.html#use-the-checks-effects-interactions-pattern
+    (bool success, ) = request.callbackAddress.call(abi.encodeWithSelector(request.callbackFunctionId, requestId, data)); // solhint-disable-line avoid-low-level-calls
     return success;
   }
 
@@ -448,7 +505,7 @@ contract Operator is AuthorizedReceiver, ConfirmedOwner, LinkTokenReceiver, Oper
     bytes4 callbackFunctionId,
     uint256 nonce,
     uint256 dataVersion
-  ) private validateNotToLINK(callbackAddress) returns (bytes32 requestId, uint256 expiration) {
+  ) internal validateNotToLINK(callbackAddress) returns (bytes32 requestId, uint256 expiration) {
     requestId = keccak256(abi.encodePacked(sender, nonce));
     require(s_commitments[requestId].paramsHash == 0, "Must use a unique ID");
     // solhint-disable-next-line not-rely-on-time
@@ -474,7 +531,7 @@ contract Operator is AuthorizedReceiver, ConfirmedOwner, LinkTokenReceiver, Oper
     bytes4 callbackFunctionId,
     uint256 expiration,
     uint256 dataVersion
-  ) internal {
+  ) private {
     bytes31 paramsHash = _buildParamsHash(payment, callbackAddress, callbackFunctionId, expiration);
     require(s_commitments[requestId].paramsHash == paramsHash, "Params do not match request ID");
     require(s_commitments[requestId].dataVersion <= _safeCastToUint8(dataVersion), "Data versions must match");

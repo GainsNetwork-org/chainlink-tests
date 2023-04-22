@@ -27,6 +27,16 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
   mapping(address => bool) private authorizedNodes;
   uint256 private withdrawableTokens = ONE_FOR_CONSISTENT_GAS_COST;
 
+  // Struct packed into 2 slots
+  // Cannot pack into 1 because we need payment to be > uint72 and expiration uint32
+  struct PackedOracleRequest {
+    address callbackAddress; // slot1: 160
+    bytes4 callbackFunctionId; // slot1: 160 + 32
+    uint128 payment; // slot2: 128
+    uint128 expiration; // slot2: 128 + 128
+  }
+  mapping(bytes32 => PackedOracleRequest) private s_packedRequests;
+
   event OracleRequest(
     bytes32 indexed specId,
     address requester,
@@ -97,6 +107,13 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
       )
     );
 
+    s_packedRequests[requestId] = PackedOracleRequest(
+      _callbackAddress,
+        _callbackFunctionId,
+      uint128(_payment),
+      uint128(expiration)
+    );
+
     emit OracleRequest(
       _specId,
       _sender,
@@ -154,6 +171,49 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
     (bool success, ) = _callbackAddress.call(abi.encodeWithSelector(_callbackFunctionId, _requestId, _data)); // solhint-disable-line avoid-low-level-calls
     return success;
   }
+
+  /**
+   * @notice Called by the Chainlink node to fulfill requests
+   * @dev Matches functionality of fulfillOracleRequest with the exception of
+   * loading _payment, _callbackAddress, _callbackFunctionId and _expiration from
+   * storage. Ideal for L2's that charge for L1 calldata.
+   * Given params must hash back to the commitment stored from `oracleRequest`.
+   * Will call the callback address' callback function without bubbling up error
+   * checking in a `require` so that the node can get paid.
+   * @param _requestId The fulfillment request ID that must match the requester's
+   * @param _data The data to return to the consuming contract
+   * @return Status if the external call was successful
+   */
+  function fulfillOracleRequestShort(
+    bytes32 _requestId,
+    bytes32 _data
+  )
+    external
+    onlyAuthorizedNode
+    isValidRequest(_requestId)
+    returns (bool)
+  {
+    PackedOracleRequest memory request = s_packedRequests[_requestId];
+
+    bytes32 paramsHash = keccak256(
+      abi.encodePacked(
+        uint(request.payment),
+        request.callbackAddress,
+        request.callbackFunctionId,
+        uint(request.expiration)
+      )
+    );
+    require(commitments[_requestId] == paramsHash, "Params do not match request ID");
+    withdrawableTokens = withdrawableTokens.add(uint(request.payment));
+    delete commitments[_requestId];
+    //require(gasleft() >= MINIMUM_CONSUMER_GAS_LIMIT, "Must provide consumer enough gas");
+    // All updates to the oracle's fulfillment should come before calling the
+    // callback(addr+functionId) as it is untrusted.
+    // See: https://solidity.readthedocs.io/en/develop/security-considerations.html#use-the-checks-effects-interactions-pattern
+    (bool success, ) = request.callbackAddress.call(abi.encodeWithSelector(request.callbackFunctionId, _requestId, _data)); // solhint-disable-line avoid-low-level-calls
+    return success;
+  }
+
 
   /**
    * @notice Use this to check if a node is authorized for fulfilling requests
