@@ -505,7 +505,7 @@ contract Operator is AuthorizedReceiver, ConfirmedOwner, LinkTokenReceiver, Oper
     bytes4 callbackFunctionId,
     uint256 nonce,
     uint256 dataVersion
-  ) internal validateNotToLINK(callbackAddress) returns (bytes32 requestId, uint256 expiration) {
+  ) private validateNotToLINK(callbackAddress) returns (bytes32 requestId, uint256 expiration) {
     requestId = keccak256(abi.encodePacked(sender, nonce));
     require(s_commitments[requestId].paramsHash == 0, "Must use a unique ID");
     // solhint-disable-next-line not-rely-on-time
@@ -531,7 +531,7 @@ contract Operator is AuthorizedReceiver, ConfirmedOwner, LinkTokenReceiver, Oper
     bytes4 callbackFunctionId,
     uint256 expiration,
     uint256 dataVersion
-  ) private {
+  ) internal {
     bytes31 paramsHash = _buildParamsHash(payment, callbackAddress, callbackFunctionId, expiration);
     require(s_commitments[requestId].paramsHash == paramsHash, "Params do not match request ID");
     require(s_commitments[requestId].dataVersion <= _safeCastToUint8(dataVersion), "Data versions must match");
