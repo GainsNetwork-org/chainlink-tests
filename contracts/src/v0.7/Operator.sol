@@ -232,7 +232,7 @@ contract Operator is AuthorizedReceiver, ConfirmedOwner, LinkTokenReceiver, Oper
 
 
     // Code below should always be the same as fulfillOracleRequest
-    _verifyOracleRequestAndProcessPayment(requestId, request.payment, request.callbackAddress, request.callbackFunctionId, request.expiration, 1);
+    _verifyOracleRequestAndProcessPayment(requestId, uint256(request.payment), request.callbackAddress, request.callbackFunctionId, uint256(request.expiration), 1);
     emit OracleResponse(requestId);
     require(gasleft() >= MINIMUM_CONSUMER_GAS_LIMIT, "Must provide consumer enough gas");
 
