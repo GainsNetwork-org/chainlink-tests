@@ -11,13 +11,15 @@ import "./vendor/SafeMathChainlink.sol";
 
 /**
  * @title The Chainlink Oracle contract
- * @notice Node operators can deploy this contract to fulfill requests sent to them
+ * @notice Node operators can deploy this contract to fulfill requests sent to them.
+ * This contract is optimized for rollups (like Arbitrum and Optimism), it will be inefficient everywhere else
  */
 contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkTokenReceiver, WithdrawalInterface {
   using SafeMathChainlink for uint256;
 
   uint256 constant public EXPIRY_TIME = 5 minutes;
   uint256 constant private MINIMUM_CONSUMER_GAS_LIMIT = 400000;
+  uint32 internal constant MAX_INDEX_SIG = 268_435_455; // 0x0FFFFFFF
   // We initialize fields to 1 instead of 0 so that the first invocation
   // does not cost more gas.
   uint256 constant private ONE_FOR_CONSISTENT_GAS_COST = 1;
@@ -35,7 +37,11 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
     uint128 payment; // slot2: 128
     uint128 expiration; // slot2: 128 + 128
   }
+
+  uint32 public orderIndex;  // type(uint32).max 4,294,967,295
   mapping(bytes32 => PackedOracleRequest) private s_packedRequests;
+  mapping(uint32 => bytes32) private s_indexRequests;
+
 
   event OracleRequest(
     bytes32 indexed specId,
@@ -63,6 +69,25 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
     Ownable()
   {
     LinkToken = LinkTokenInterface(_link); // external but already deployed and unalterable
+  }
+
+  /**
+  * @notice Fallback function
+  * @dev When calldata.length === 36 bytes, forwards message to fulfillOracleRequestShort
+  */
+  fallback() external payable {
+    if(msg.data.length == 36) { // 36 = sig + 1 word
+      uint32 index = uint32(msg.sig);
+
+      // if sig is gt 0x0FFFFFFF (the max request index we allow) then it's not one of our calls
+      if (index > MAX_INDEX_SIG)
+        return;
+
+      // call fulfillOracleRequestShort
+      bytes32 _data = abi.decode(msg.data[4:], (bytes32));
+      fulfillOracleRequestShort(s_indexRequests[index], _data);
+      delete s_indexRequests[index];
+    }
   }
 
   /**
@@ -109,10 +134,18 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
 
     s_packedRequests[requestId] = PackedOracleRequest(
       _callbackAddress,
-        _callbackFunctionId,
+      _callbackFunctionId,
       uint128(_payment),
       uint128(expiration)
     );
+
+    uint32 _index = orderIndex;
+    // we know there are no valid signatures in this contract with a leading 0 so we
+    // limit max index to 0x0FFFFFFF (MAX_INDEX_SIG)
+    require(_index <= MAX_INDEX_SIG);
+    s_indexRequests[_index] = requestId;
+    orderIndex = _index + 1; // can't overflow since we always stay below 0x0FFFFFFF + 1
+
 
     emit OracleRequest(
       _specId,
@@ -120,7 +153,9 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
       requestId,
       _payment,
       _callbackAddress,
-      _callbackFunctionId,
+      // highjack `_callbackFunctionId` since our custom nodes read that param from storage and
+      // we need somewhere to emit `_index` without modifying the event (it would break the node)
+      bytes4(_index),
       expiration,
       _dataVersion,
       _data);
@@ -188,7 +223,7 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
     bytes32 _requestId,
     bytes32 _data
   )
-    external
+    public
     onlyAuthorizedNode
     isValidRequest(_requestId)
     returns (bool)
@@ -206,6 +241,7 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
     require(commitments[_requestId] == paramsHash, "Params do not match request ID");
     withdrawableTokens = withdrawableTokens.add(uint(request.payment));
     delete commitments[_requestId];
+    delete s_packedRequests[_requestId];
     //require(gasleft() >= MINIMUM_CONSUMER_GAS_LIMIT, "Must provide consumer enough gas");
     // All updates to the oracle's fulfillment should come before calling the
     // callback(addr+functionId) as it is untrusted.
