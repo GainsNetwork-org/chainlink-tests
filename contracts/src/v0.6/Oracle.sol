@@ -140,11 +140,16 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
     );
 
     uint32 _index = orderIndex;
+    s_indexRequests[_index] = requestId;
+
     // we know there are no valid signatures in this contract with a leading 0 so we
     // limit max index to 0x0FFFFFFF (MAX_INDEX_SIG)
-    require(_index <= MAX_INDEX_SIG);
-    s_indexRequests[_index] = requestId;
-    orderIndex = _index + 1; // can't overflow since we always stay below 0x0FFFFFFF + 1
+    // if current index is MAX_INDEX_SIG then we reset index to zero
+    if (_index == MAX_INDEX_SIG) {
+      orderIndex = 0;
+    } else {
+      orderIndex = _index + 1; // can't overflow since we always stay below 0x0FFFFFFF + 1
+    }
 
 
     emit OracleRequest(
