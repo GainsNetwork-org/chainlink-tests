@@ -345,6 +345,7 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
     require(_expiration <= now, "Request is not expired");
 
     delete commitments[_requestId];
+    delete s_packedRequests[_requestId];
     emit CancelOracleRequest(_requestId);
 
     assert(LinkToken.transfer(msg.sender, _payment));
