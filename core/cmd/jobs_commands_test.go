@@ -10,12 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli"
 
-	"github.com/smartcontractkit/chainlink/core/cmd"
-	"github.com/smartcontractkit/chainlink/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/core/services/chainlink"
-	"github.com/smartcontractkit/chainlink/core/services/job"
-	"github.com/smartcontractkit/chainlink/core/store/models"
-	"github.com/smartcontractkit/chainlink/core/web/presenters"
+	"github.com/smartcontractkit/chainlink/v2/core/cmd"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
+	"github.com/smartcontractkit/chainlink/v2/core/services/job"
+	"github.com/smartcontractkit/chainlink/v2/core/store/models"
+	"github.com/smartcontractkit/chainlink/v2/core/web/presenters"
 )
 
 func TestJobPresenter_RenderTable(t *testing.T) {
@@ -223,6 +223,18 @@ func TestJob_FriendlyCreatedAt(t *testing.T) {
 			now.Format(time.RFC3339),
 		},
 		{
+			"gets the blockheaderfeeder spec created at timestamp",
+			&cmd.JobPresenter{
+				JobResource: presenters.JobResource{
+					Type: presenters.BlockHeaderFeederJobSpec,
+					BlockHeaderFeederSpec: &presenters.BlockHeaderFeederSpec{
+						CreatedAt: now,
+					},
+				},
+			},
+			now.Format(time.RFC3339),
+		},
+		{
 			"invalid type",
 			&cmd.JobPresenter{
 				JobResource: presenters.JobResource{
@@ -291,7 +303,10 @@ func TestClient_ListFindJobs(t *testing.T) {
 
 	// Create the job
 	fs := flag.NewFlagSet("", flag.ExitOnError)
-	fs.Parse([]string{"../testdata/tomlspecs/direct-request-spec.toml"})
+	cltest.FlagSetApplyFromAction(client.CreateJob, fs, "")
+
+	require.NoError(t, fs.Parse([]string{"../testdata/tomlspecs/direct-request-spec.toml"}))
+
 	err := client.CreateJob(cli.NewContext(nil, fs, nil))
 	require.NoError(t, err)
 	require.Len(t, r.Renders, 1)
@@ -314,7 +329,10 @@ func TestClient_ShowJob(t *testing.T) {
 
 	// Create the job
 	fs := flag.NewFlagSet("", flag.ExitOnError)
-	fs.Parse([]string{"../testdata/tomlspecs/direct-request-spec.toml"})
+	cltest.FlagSetApplyFromAction(client.CreateJob, fs, "")
+
+	require.NoError(t, fs.Parse([]string{"../testdata/tomlspecs/direct-request-spec.toml"}))
+
 	err := client.CreateJob(cli.NewContext(nil, fs, nil))
 	require.NoError(t, err)
 	require.Len(t, r.Renders, 1)
@@ -322,7 +340,8 @@ func TestClient_ShowJob(t *testing.T) {
 	require.True(t, ok, "Expected Renders[0] to be *cmd.JobPresenter, got %T", r.Renders[0])
 
 	set := flag.NewFlagSet("test", 0)
-	set.Parse([]string{createOutput.ID})
+	err = set.Parse([]string{createOutput.ID})
+	require.NoError(t, err)
 	c := cli.NewContext(nil, set, nil)
 
 	require.NoError(t, client.ShowJob(c))
@@ -350,7 +369,10 @@ func TestClient_CreateJobV2(t *testing.T) {
 	requireJobsCount(t, app.JobORM(), 0)
 
 	fs := flag.NewFlagSet("", flag.ExitOnError)
-	fs.Parse([]string{"../testdata/tomlspecs/ocr-bootstrap-spec.toml"})
+	cltest.FlagSetApplyFromAction(client.CreateJob, fs, "")
+
+	require.NoError(t, fs.Parse([]string{"../testdata/tomlspecs/ocr-bootstrap-spec.toml"}))
+
 	err := client.CreateJob(cli.NewContext(nil, fs, nil))
 	require.NoError(t, err)
 
@@ -376,7 +398,10 @@ func TestClient_DeleteJob(t *testing.T) {
 
 	// Create the job
 	fs := flag.NewFlagSet("", flag.ExitOnError)
-	fs.Parse([]string{"../testdata/tomlspecs/direct-request-spec.toml"})
+	cltest.FlagSetApplyFromAction(client.CreateJob, fs, "")
+
+	require.NoError(t, fs.Parse([]string{"../testdata/tomlspecs/direct-request-spec.toml"}))
+
 	err := client.CreateJob(cli.NewContext(nil, fs, nil))
 	require.NoError(t, err)
 	require.NotEmpty(t, r.Renders)
@@ -392,11 +417,15 @@ func TestClient_DeleteJob(t *testing.T) {
 
 	// Must supply job id
 	set := flag.NewFlagSet("test", 0)
+	cltest.FlagSetApplyFromAction(client.DeleteJob, set, "")
 	c := cli.NewContext(nil, set, nil)
 	require.Equal(t, "must pass the job id to be archived", client.DeleteJob(c).Error())
 
 	set = flag.NewFlagSet("test", 0)
-	set.Parse([]string{output.ID})
+	cltest.FlagSetApplyFromAction(client.DeleteJob, set, "")
+
+	require.NoError(t, set.Parse([]string{output.ID}))
+
 	c = cli.NewContext(nil, set, nil)
 	require.NoError(t, client.DeleteJob(c))
 

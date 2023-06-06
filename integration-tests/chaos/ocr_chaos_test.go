@@ -7,16 +7,18 @@ import (
 	"os"
 	"testing"
 
-	"github.com/rs/zerolog/log"
+	a "github.com/smartcontractkit/chainlink-env/pkg/alias"
+	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
+	"github.com/smartcontractkit/chainlink-env/pkg/helm/ethereum"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
+
+	"github.com/smartcontractkit/chainlink/integration-tests/config"
 
 	"github.com/onsi/gomega"
 	"github.com/smartcontractkit/chainlink-env/chaos"
 	"github.com/smartcontractkit/chainlink-env/environment"
 	"github.com/smartcontractkit/chainlink-env/logging"
-	a "github.com/smartcontractkit/chainlink-env/pkg/alias"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
-	"github.com/smartcontractkit/chainlink-env/pkg/helm/ethereum"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/mockserver"
 	mockservercfg "github.com/smartcontractkit/chainlink-env/pkg/helm/mockserver-cfg"
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
@@ -31,11 +33,11 @@ import (
 
 var (
 	defaultOCRSettings = map[string]interface{}{
-		"toml":     client.AddNetworksConfig(`OCR.Enabled = true`, networks.SelectedNetwork),
+		"toml":     client.AddNetworksConfig(config.BaseOCRP2PV1Config, networks.SelectedNetwork),
 		"replicas": "6",
 		"db": map[string]interface{}{
 			"stateful": true,
-			"capacity": "10Gi",
+			"capacity": "1Gi",
 			"resources": map[string]interface{}{
 				"requests": map[string]interface{}{
 					"cpu":    "250m",
@@ -50,16 +52,6 @@ var (
 	}
 	chaosStartRound int64 = 1
 	chaosEndRound   int64 = 4
-	chaosApplied          = false
-)
-
-const (
-	// ChaosGroupMinorityOCR a group of faulty nodes, even if they fail OCR must work
-	ChaosGroupMinorityOCR = "chaosGroupMinority"
-	// ChaosGroupMajorityOCR a group of nodes that are working even if minority fails
-	ChaosGroupMajorityOCR = "chaosGroupMajority"
-	// ChaosGroupMajorityOCRPlus a group of nodes that are majority + 1
-	ChaosGroupMajorityOCRPlus = "chaosGroupMajority"
 )
 
 func TestMain(m *testing.M) {
@@ -68,58 +60,70 @@ func TestMain(m *testing.M) {
 }
 
 func TestOCRChaos(t *testing.T) {
+	t.Parallel()
+	l := utils.GetTestLogger(t)
 	testCases := map[string]struct {
 		networkChart environment.ConnectedChart
 		clChart      environment.ConnectedChart
 		chaosFunc    chaos.ManifestFunc
 		chaosProps   *chaos.Props
 	}{
-		"fail-minority": {
-			ethereum.New(nil),
-			chainlink.New(0, defaultOCRSettings),
-			chaos.NewFailPods,
-			&chaos.Props{
-				LabelsSelector: &map[string]*string{ChaosGroupMinorityOCR: a.Str("1")},
-				DurationStr:    "1m",
-			},
-		},
-		"fail-majority": {
-			ethereum.New(nil),
-			chainlink.New(0, defaultOCRSettings),
-			chaos.NewFailPods,
-			&chaos.Props{
-				LabelsSelector: &map[string]*string{ChaosGroupMajorityOCR: a.Str("1")},
-				DurationStr:    "1m",
-			},
-		},
-		"fail-majority-db": {
-			ethereum.New(nil),
-			chainlink.New(0, defaultOCRSettings),
-			chaos.NewFailPods,
-			&chaos.Props{
-				LabelsSelector: &map[string]*string{ChaosGroupMajorityOCR: a.Str("1")},
-				DurationStr:    "1m",
-				ContainerNames: &[]*string{a.Str("chainlink-db")},
-			},
-		},
-		"fail-majority-network": {
+		// network-* and pods-* are split intentionally into 2 parallel groups
+		// we can't use chaos.NewNetworkPartition and chaos.NewFailPods in parallel
+		// because of jsii runtime bug, see Makefile and please use those targets to run tests
+		//
+		// We are using two chaos experiments to simulate pods/network faults,
+		// check chaos.NewFailPods method (https://chaos-mesh.org/docs/simulate-pod-chaos-on-kubernetes/)
+		// and chaos.NewNetworkPartition method (https://chaos-mesh.org/docs/simulate-network-chaos-on-kubernetes/)
+		// in order to regenerate Go bindings if k8s version will be updated
+		// you can pull new CRD spec from your current cluster and check README here
+		// https://github.com/smartcontractkit/chainlink-env/blob/master/README.md
+		NetworkChaosFailMajorityNetwork: {
 			ethereum.New(nil),
 			chainlink.New(0, defaultOCRSettings),
 			chaos.NewNetworkPartition,
 			&chaos.Props{
-				FromLabels:  &map[string]*string{ChaosGroupMajorityOCR: a.Str("1")},
-				ToLabels:    &map[string]*string{ChaosGroupMinorityOCR: a.Str("1")},
+				FromLabels:  &map[string]*string{ChaosGroupMajority: a.Str("1")},
+				ToLabels:    &map[string]*string{ChaosGroupMinority: a.Str("1")},
 				DurationStr: "1m",
 			},
 		},
-		"fail-blockchain-node": {
+		NetworkChaosFailBlockchainNode: {
 			ethereum.New(nil),
 			chainlink.New(0, defaultOCRSettings),
 			chaos.NewNetworkPartition,
 			&chaos.Props{
 				FromLabels:  &map[string]*string{"app": a.Str("geth")},
-				ToLabels:    &map[string]*string{ChaosGroupMajorityOCRPlus: a.Str("1")},
+				ToLabels:    &map[string]*string{ChaosGroupMajorityPlus: a.Str("1")},
 				DurationStr: "1m",
+			},
+		},
+		PodChaosFailMinorityNodes: {
+			ethereum.New(nil),
+			chainlink.New(0, defaultOCRSettings),
+			chaos.NewFailPods,
+			&chaos.Props{
+				LabelsSelector: &map[string]*string{ChaosGroupMinority: a.Str("1")},
+				DurationStr:    "1m",
+			},
+		},
+		PodChaosFailMajorityNodes: {
+			ethereum.New(nil),
+			chainlink.New(0, defaultOCRSettings),
+			chaos.NewFailPods,
+			&chaos.Props{
+				LabelsSelector: &map[string]*string{ChaosGroupMajority: a.Str("1")},
+				DurationStr:    "1m",
+			},
+		},
+		PodChaosFailMajorityDB: {
+			ethereum.New(nil),
+			chainlink.New(0, defaultOCRSettings),
+			chaos.NewFailPods,
+			&chaos.Props{
+				LabelsSelector: &map[string]*string{ChaosGroupMajority: a.Str("1")},
+				DurationStr:    "1m",
+				ContainerNames: &[]*string{a.Str("chainlink-db")},
 			},
 		},
 	}
@@ -127,22 +131,28 @@ func TestOCRChaos(t *testing.T) {
 	for n, tst := range testCases {
 		name := n
 		testCase := tst
-		t.Run(name, func(t *testing.T) {
+		t.Run(fmt.Sprintf("OCR_%s", name), func(t *testing.T) {
 			t.Parallel()
 
-			testEnvironment := environment.New(&environment.Config{NamespacePrefix: fmt.Sprintf("chaos-ocr-%s", name)}).
+			testEnvironment := environment.New(&environment.Config{
+				NamespacePrefix: fmt.Sprintf("chaos-ocr-%s", name),
+				Test:            t,
+			}).
 				AddHelm(mockservercfg.New(nil)).
 				AddHelm(mockserver.New(nil)).
 				AddHelm(testCase.networkChart).
 				AddHelm(testCase.clChart)
 			err := testEnvironment.Run()
 			require.NoError(t, err)
+			if testEnvironment.WillUseRemoteRunner() {
+				return
+			}
 
-			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, 1, 2, ChaosGroupMinorityOCR)
+			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, 1, 2, ChaosGroupMinority)
 			require.NoError(t, err)
-			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, 3, 5, ChaosGroupMajorityOCR)
+			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, 3, 5, ChaosGroupMajority)
 			require.NoError(t, err)
-			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, 2, 5, ChaosGroupMajorityOCRPlus)
+			err = testEnvironment.Client.LabelChaosGroup(testEnvironment.Cfg.Namespace, 2, 5, ChaosGroupMajorityPlus)
 			require.NoError(t, err)
 
 			chainClient, err := blockchain.NewEVMClient(blockchain.SimulatedEVMNetwork, testEnvironment)
@@ -152,11 +162,12 @@ func TestOCRChaos(t *testing.T) {
 
 			chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
 			require.NoError(t, err, "Connecting to chainlink nodes shouldn't fail")
+			bootstrapNode, workerNodes := chainlinkNodes[0], chainlinkNodes[1:]
 			t.Cleanup(func() {
 				if chainClient != nil {
 					chainClient.GasStats().PrintStats()
 				}
-				err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, chainClient)
+				err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, zapcore.PanicLevel, chainClient)
 				require.NoError(t, err, "Error tearing down environment")
 			})
 
@@ -172,11 +183,14 @@ func TestOCRChaos(t *testing.T) {
 			err = actions.FundChainlinkNodes(chainlinkNodes, chainClient, big.NewFloat(10))
 			require.NoError(t, err)
 
-			ocrInstances := actions.DeployOCRContracts(t, 1, lt, cd, chainlinkNodes, chainClient)
+			ocrInstances, err := actions.DeployOCRContracts(1, lt, cd, bootstrapNode, workerNodes, chainClient)
+			require.NoError(t, err)
 			err = chainClient.WaitForEvents()
 			require.NoError(t, err)
-			actions.SetAllAdapterResponsesToTheSameValue(t, 5, ocrInstances, chainlinkNodes, ms)
-			actions.CreateOCRJobs(t, ocrInstances, chainlinkNodes, ms)
+			err = actions.CreateOCRJobs(ocrInstances, bootstrapNode, workerNodes, "ocr_chaos", 5, ms)
+			require.NoError(t, err)
+
+			chaosApplied := false
 
 			gom := gomega.NewGomegaWithT(t)
 			gom.Eventually(func(g gomega.Gomega) {
@@ -186,7 +200,7 @@ func TestOCRChaos(t *testing.T) {
 				}
 				round, err := ocrInstances[0].GetLatestRound(context.Background())
 				g.Expect(err).ShouldNot(gomega.HaveOccurred())
-				log.Info().Int64("RoundID", round.RoundId.Int64()).Msg("Latest OCR Round")
+				l.Info().Int64("RoundID", round.RoundId.Int64()).Msg("Latest OCR Round")
 				if round.RoundId.Int64() == chaosStartRound && !chaosApplied {
 					chaosApplied = true
 					_, err = testEnvironment.Chaos.Run(testCase.chaosFunc(testEnvironment.Cfg.Namespace, testCase.chaosProps))

@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Changed
+
+- Change Functions Client variables to internal for use when integrating Automation (#8429)
+- Make Functions Billing Registry and Functions Oracle upgradable using the transparent proxy pattern (#8371)
+- Update dependency hardhat from version 2.10.1 to 2.12.7 (#8464)
+- Fix Functions cost estimation not correctly using registry fee
+- Fix Functions transmitter NOP fee payment (#8557)
+- Functions library uses solidty-cborutils CBOR v2.0.0 and ENS Buffer v0.1.0(#8485)
+- Gas optimization to AuthorizedOriginReceiverUpgradable by using EnumberableSet .values()
+- Remove support for inline secrets in Functions requests
+
+## 0.6.1 - 2023-02-06
+
+### Added
+
+- Support for off-chain secrets in Functions Oracle contract
+
+### Changed
+
+- Modified FunctionsClientExample.sol to use constant amount of gas regardless of response size
+- Fixed comments in FunctionsBillingRegistry.sol
+- Make Functions billing registry's timeoutRequest pausable (#8299)
+- Remove user specified gas price from Functions Oracle sendRequest
+  (#8320)
+
+## 0.6.0 - 2023-01-11
+
 ### Added
 
 - Added a Solidity style guide.
@@ -9,7 +36,7 @@
 ### Changed
 
 - Migrated and improved `AuthorizedReceiverInterface` and `AuthorizedReceiver` from 0.7.0
-- Added `OCR2DR` interfaces and contracts (initial version for PoC)
+- Added `Chainlink Functions` interfaces and contracts (initial version for PoC)
 
 ## 0.5.1 - 2022-09-27
 

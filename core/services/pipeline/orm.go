@@ -8,14 +8,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 
-	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/services"
-	"github.com/smartcontractkit/chainlink/core/services/pg"
-	"github.com/smartcontractkit/chainlink/core/store/models"
-	"github.com/smartcontractkit/chainlink/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
+	"github.com/smartcontractkit/chainlink/v2/core/store/models"
+	"github.com/smartcontractkit/chainlink/v2/core/utils"
 
 	"github.com/smartcontractkit/sqlx"
 )
@@ -108,18 +108,13 @@ type orm struct {
 
 var _ ORM = (*orm)(nil)
 
-type ORMConfig interface {
-	pg.QConfig
-	JobPipelineMaxSuccessfulRuns() uint64
-}
-
-func NewORM(db *sqlx.DB, lggr logger.Logger, cfg ORMConfig) *orm {
+func NewORM(db *sqlx.DB, lggr logger.Logger, cfg pg.QConfig, jobPipelineMaxSuccessfulRuns uint64) *orm {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &orm{
 		utils.StartStopOnce{},
 		pg.NewQ(db, lggr, cfg),
 		lggr.Named("PipelineORM"),
-		cfg.JobPipelineMaxSuccessfulRuns(),
+		jobPipelineMaxSuccessfulRuns,
 		sync.Map{},
 		sync.WaitGroup{},
 		ctx,
@@ -146,6 +141,14 @@ func (o *orm) Close() error {
 		o.wg.Wait()
 		return nil
 	})
+}
+
+func (o *orm) Name() string {
+	return o.lggr.Name()
+}
+
+func (o *orm) HealthReport() map[string]error {
+	return map[string]error{o.Name(): o.Healthy()}
 }
 
 func (o *orm) CreateSpec(pipeline Pipeline, maxTaskDuration models.Interval, qopts ...pg.QOpt) (id int32, err error) {
@@ -458,6 +461,8 @@ func (o *orm) DeleteRunsOlderThan(ctx context.Context, threshold time.Duration) 
 
 	queryThreshold := start.Add(-threshold)
 
+	rowsDeleted := int64(0)
+
 	err := pg.Batch(func(_, limit uint) (count uint, err error) {
 		result, cancel, err := q.ExecQIter(`
 WITH batched_pipeline_runs AS (
@@ -481,6 +486,7 @@ WHERE pipeline_runs.id = batched_pipeline_runs.id`,
 		if err != nil {
 			return count, errors.Wrap(err, "DeleteRunsOlderThan failed to get rows affected")
 		}
+		rowsDeleted += rowsAffected
 
 		return uint(rowsAffected), err
 	})
@@ -490,7 +496,7 @@ WHERE pipeline_runs.id = batched_pipeline_runs.id`,
 
 	deleteTS := time.Now()
 
-	o.lggr.Debugw("pipeline_runs reaper DELETE query completed", "duration", deleteTS.Sub(start))
+	o.lggr.Debugw("pipeline_runs reaper DELETE query completed", "rowsDeleted", rowsDeleted, "duration", deleteTS.Sub(start))
 	defer func(start time.Time) {
 		o.lggr.Debugw("pipeline_runs reaper VACUUM ANALYZE query completed", "duration", time.Since(start))
 	}(deleteTS)
@@ -683,7 +689,7 @@ LIMIT $3
 	if rowsAffected == 0 {
 		// check the spec still exists and garbage collect if necessary
 		var exists bool
-		if err := q.SelectContext(o.ctx, &exists, `SELECT EXISTS(SELECT * FROM pipeline_specs WHERE id = $1)`, pipelineSpecID); err != nil {
+		if err := q.GetContext(o.ctx, &exists, `SELECT EXISTS(SELECT * FROM pipeline_specs WHERE id = $1)`, pipelineSpecID); err != nil {
 			o.lggr.Errorw("Failed check existence of pipeline_spec while pruning runs", "err", err, "pipelineSpecID", pipelineSpecID)
 			return
 		}

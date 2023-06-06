@@ -10,21 +10,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pelletier/go-toml"
-	uuid "github.com/satori/go.uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/smartcontractkit/chainlink/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils"
-	configtest "github.com/smartcontractkit/chainlink/core/internal/testutils/configtest/v2"
-	"github.com/smartcontractkit/chainlink/core/services/chainlink"
-	"github.com/smartcontractkit/chainlink/core/services/job"
-	"github.com/smartcontractkit/chainlink/core/services/webhook"
-	"github.com/smartcontractkit/chainlink/core/store/models"
-	"github.com/smartcontractkit/chainlink/core/testdata/testspecs"
-	"github.com/smartcontractkit/chainlink/core/web"
-	"github.com/smartcontractkit/chainlink/core/web/presenters"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	configtest "github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest/v2"
+	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
+	"github.com/smartcontractkit/chainlink/v2/core/services/job"
+	"github.com/smartcontractkit/chainlink/v2/core/services/webhook"
+	"github.com/smartcontractkit/chainlink/v2/core/store/models"
+	"github.com/smartcontractkit/chainlink/v2/core/testdata/testspecs"
+	"github.com/smartcontractkit/chainlink/v2/core/web"
+	"github.com/smartcontractkit/chainlink/v2/core/web/presenters"
 )
 
 func TestPipelineRunsController_CreateWithBody_HappyPath(t *testing.T) {
@@ -161,7 +161,8 @@ func TestPipelineRunsController_Index_GlobalHappyPath(t *testing.T) {
 	assert.NoError(t, err)
 
 	require.Len(t, parsedResponse, 2)
-	assert.Equal(t, parsedResponse[1].ID, strconv.Itoa(int(runIDs[1])))
+	// Job Run ID is returned in descending order by run ID (most recent run first)
+	assert.Equal(t, parsedResponse[1].ID, strconv.Itoa(int(runIDs[0])))
 	assert.NotNil(t, parsedResponse[1].CreatedAt)
 	assert.NotNil(t, parsedResponse[1].FinishedAt)
 	assert.Equal(t, jobID, parsedResponse[1].PipelineSpec.JobID)
@@ -183,7 +184,8 @@ func TestPipelineRunsController_Index_HappyPath(t *testing.T) {
 	assert.NoError(t, err)
 
 	require.Len(t, parsedResponse, 2)
-	assert.Equal(t, parsedResponse[1].ID, strconv.Itoa(int(runIDs[1])))
+	// Job Run ID is returned in descending order by run ID (most recent run first)
+	assert.Equal(t, parsedResponse[1].ID, strconv.Itoa(int(runIDs[0])))
 	assert.NotNil(t, parsedResponse[1].CreatedAt)
 	assert.NotNil(t, parsedResponse[1].FinishedAt)
 	assert.Equal(t, jobID, parsedResponse[1].PipelineSpec.JobID)

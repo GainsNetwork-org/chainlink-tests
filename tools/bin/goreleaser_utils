@@ -24,7 +24,7 @@ _get_wasmvm_lib_path() {
   local -r platform="$1"
   local -r arch="$2"
   wasmvm_dir=$(go list -json -m all | jq -r '. | select(.Path == "github.com/CosmWasm/wasmvm") | .Dir')
-  shared_lib_dir="$wasmvm_dir/api"
+  shared_lib_dir="$wasmvm_dir/internal/api"
   lib_name="libwasmvm"
   if [ "$platform" == "darwin" ]; then
     lib_extension="dylib"
@@ -45,6 +45,7 @@ _get_wasmvm_lib_path() {
 # moves native libraries to temp directories used by docker images / archives
 before_hook() {
   local -r lib_path=tmp
+  # MOVE NATIVE LIBRARIES HERE
   local -r wasmvm_lib_path_linux_amd64=$(_get_wasmvm_lib_path "linux" "amd64")
   local -r wasmvm_lib_path_linux_arm64=$(_get_wasmvm_lib_path "linux" "arm64")
   local -r wasmvm_lib_path_darwin_amd64=$(_get_wasmvm_lib_path "darwin" "amd64")
@@ -66,6 +67,7 @@ build_post_hook() {
   local -r lib_path=$dist_path/libs
   local -r platform=$2
   local -r arch=$3
+  # COPY NATIVE LIBRARIES HERE
   local -r wasmvm_lib_path=$(_get_wasmvm_lib_path "$platform" "$arch")
   mkdir -p "$lib_path"
   cp "$wasmvm_lib_path" "$lib_path"

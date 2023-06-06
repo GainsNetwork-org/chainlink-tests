@@ -1,8 +1,6 @@
 package logger
 
 import (
-	"fmt"
-	"io"
 	"os"
 
 	"github.com/pkg/errors"
@@ -20,10 +18,10 @@ type zapLogger struct {
 	callerSkip int
 }
 
-func makeEncoderConfig(cfg Config) zapcore.EncoderConfig {
+func makeEncoderConfig(unixTS bool) zapcore.EncoderConfig {
 	encoderConfig := zap.NewProductionEncoderConfig()
 
-	if !cfg.UnixTS {
+	if !unixTS {
 		encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	}
 
@@ -73,20 +71,12 @@ func (l *zapLogger) Helper(skip int) Logger {
 	return &newLogger
 }
 
+func (l *zapLogger) Name() string {
+	return l.name
+}
+
 func (l *zapLogger) sugaredHelper(skip int) *zap.SugaredLogger {
 	return l.SugaredLogger.WithOptions(zap.AddCallerSkip(skip))
-}
-
-func (l *zapLogger) ErrorIf(err error, msg string) {
-	if err != nil {
-		l.Helper(1).Errorw(msg, "err", err)
-	}
-}
-
-func (l *zapLogger) ErrorIfClosing(c io.Closer, name string) {
-	if err := c.Close(); err != nil {
-		l.Helper(1).Errorw(fmt.Sprintf("Error closing %s", name), "err", err)
-	}
 }
 
 func (l *zapLogger) Sync() error {

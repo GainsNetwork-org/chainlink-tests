@@ -7,7 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
+
 	"github.com/smartcontractkit/chainlink-env/environment"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/ethereum"
@@ -16,19 +20,20 @@ import (
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
 	ctfClient "github.com/smartcontractkit/chainlink-testing-framework/client"
 	"github.com/smartcontractkit/chainlink-testing-framework/utils"
+
 	networks "github.com/smartcontractkit/chainlink/integration-tests"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
-	"github.com/stretchr/testify/require"
-
-	"github.com/rs/zerolog/log"
-	uuid "github.com/satori/go.uuid"
 )
 
 func TestRunLogBasic(t *testing.T) {
 	t.Parallel()
+	l := utils.GetTestLogger(t)
 	testEnvironment, testNetwork := setupRunLogTest(t)
+	if testEnvironment.WillUseRemoteRunner() {
+		return
+	}
 
 	chainClient, err := blockchain.NewEVMClient(testNetwork, testEnvironment)
 	require.NoError(t, err, "Connecting to blockchain nodes shouldn't fail")
@@ -37,7 +42,7 @@ func TestRunLogBasic(t *testing.T) {
 	chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
 	require.NoError(t, err, "Connecting to chainlink nodes shouldn't fail")
 	t.Cleanup(func() {
-		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, chainClient)
+		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, zapcore.ErrorLevel, chainClient)
 		require.NoError(t, err, "Error tearing down environment")
 	})
 
@@ -60,7 +65,7 @@ func TestRunLogBasic(t *testing.T) {
 	err = mockServer.SetValuePath("/variable", 5)
 	require.NoError(t, err, "Setting mockserver value path shouldn't fail")
 
-	jobUUID := uuid.NewV4()
+	jobUUID := uuid.New()
 
 	bta := client.BridgeTypeAttributes{
 		Name: fmt.Sprintf("five-%s", jobUUID.String()),
@@ -103,7 +108,7 @@ func TestRunLogBasic(t *testing.T) {
 		d, err := consumer.Data(context.Background())
 		g.Expect(err).ShouldNot(gomega.HaveOccurred(), "Getting data from consumer contract shouldn't fail")
 		g.Expect(d).ShouldNot(gomega.BeNil(), "Expected the initial on chain data to be nil")
-		log.Debug().Int64("Data", d.Int64()).Msg("Found on chain")
+		l.Debug().Int64("Data", d.Int64()).Msg("Found on chain")
 		g.Expect(d.Int64()).Should(gomega.BeNumerically("==", 5), "Expected the on-chain data to be 5, but found %d", d.Int64())
 	}, "2m", "1s").Should(gomega.Succeed())
 }
@@ -120,6 +125,7 @@ func setupRunLogTest(t *testing.T) (testEnvironment *environment.Environment, te
 	}
 	testEnvironment = environment.New(&environment.Config{
 		NamespacePrefix: fmt.Sprintf("smoke-runlog-%s", strings.ReplaceAll(strings.ToLower(testNetwork.Name), " ", "-")),
+		Test:            t,
 	}).
 		AddHelm(mockservercfg.New(nil)).
 		AddHelm(mockserver.New(nil)).

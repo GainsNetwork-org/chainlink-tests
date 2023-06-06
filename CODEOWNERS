@@ -1,10 +1,19 @@
+# CODEOWNERS Best Practices
+# 1. Per Github docs: "Order is important; the last matching pattern takes the most precedence." 
+# Please define less specific codeowner paths before more specific codeowner paths in order for the more specific rule to have priority
+
+# Misc
+/core/store @samsondav @jmank88
+/core/chains @samsondav
+/core/logger @jmank88
+/core/internal @samsondav @jmank88
+
 # Chains
-/core/chains/evm/headtracker @pinebit @samsondav @prashantkumar1982
 /core/chains/evm @samsondav @prashantkumar1982
+/core/chains/evm/headtracker @pinebit @samsondav @prashantkumar1982
 /core/chains/evm/client @samsondav @prashantkumar1982
 /core/chains/evm/log @jmank88 @prashantkumar1982 @connorwstein
-/core/chains/evm @samsondav @prashantkumar1982
-/core/chains/terra @connorwstein @jmank88
+/core/chains/cosmos @archseer @cfal
 
 # Services
 /core/services/cron @samsondav
@@ -33,6 +42,9 @@
 
 /core/services/webhook @samsondav
 
+# Chainlink Functions related services
+core/services/ocr2/plugins/functions @bolekk @justinkaseman @KuphJr @pinebit
+
 # API
 /core/web @jkongie
 
@@ -43,25 +55,24 @@
 /operator-ui/ @DeividasK @jkongie
 
 # Contracts
-/contracts/ @alexroan @se3000 @connorwstein
+/contracts/ @se3000 @connorwstein
 /contracts/**/*Keeper* @smartcontractkit/keepers
 /contracts/**/*Upkeep* @smartcontractkit/keepers
+/contracts/**/*Functions* @bolekk @justinkaseman @KuphJr @pinebit
+/contracts/src/v0.8/functions @bolekk @justinkaseman @KuphJr @pinebit
 
 # Tests
-/integration-tests/ @kalverra @tateexon @skudasov @anieeg
+/integration-tests/ @smartcontractkit/test-tooling-team
 /integration-tests/**/*keeper* @smartcontractkit/keepers
-
-# Misc
-/core/store @samsondav @jmank88
-/core/chains @samsondav
-/core/logger @jmank88
-/core/internal @samsondav @jmank88
+/integration-tests/**/*automation* @smartcontractkit/keepers
 
 # CI/CD
-/.github/** @alexroan @chainchad @HenryNguyen5 @javuto @jkongie @jmank88 @samsondav
-/.github/workflows/integration-tests.yml @kalverra @tateexon @skudasov @anieeg
-/.github/workflows/integration-chaos-tests.yml @kalverra @tateexon @skudasov @anieeg
-/.github/workflows/performance-tests.yml @kalverra @tateexon @skudasov @anieeg
+/.github/** @chainchad @javuto @jkongie @jmank88 @samsondav
+/.github/workflows/integration-tests.yml @smartcontractkit/test-tooling-team
+/.github/workflows/integration-chaos-tests.yml @smartcontractkit/test-tooling-team
+/.github/workflows/integration-tests-publish.yml @smartcontractkit/test-tooling-team
+/.github/workflows/performance-tests.yml @smartcontractkit/test-tooling-team
+
 /core/chainlink.Dockerfile @smartcontractkit/prodsec-public
 
 # Dependencies

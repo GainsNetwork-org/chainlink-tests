@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
+
 	"github.com/smartcontractkit/chainlink-env/environment"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/ethereum"
@@ -15,17 +18,20 @@ import (
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
 	ctfClient "github.com/smartcontractkit/chainlink-testing-framework/client"
 	"github.com/smartcontractkit/chainlink-testing-framework/utils"
-	"github.com/stretchr/testify/require"
 
 	networks "github.com/smartcontractkit/chainlink/integration-tests"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
+	"github.com/smartcontractkit/chainlink/integration-tests/config"
 	"github.com/smartcontractkit/chainlink/integration-tests/contracts"
 )
 
 func TestOCRBasic(t *testing.T) {
 	t.Parallel()
 	testEnvironment, testNetwork := setupOCRTest(t)
+	if testEnvironment.WillUseRemoteRunner() {
+		return
+	}
 
 	chainClient, err := blockchain.NewEVMClient(testNetwork, testEnvironment)
 	require.NoError(t, err, "Connecting to blockchain nodes shouldn't fail")
@@ -34,11 +40,12 @@ func TestOCRBasic(t *testing.T) {
 
 	chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
 	require.NoError(t, err, "Connecting to chainlink nodes shouldn't fail")
+	bootstrapNode, workerNodes := chainlinkNodes[0], chainlinkNodes[1:]
 	mockServer, err := ctfClient.ConnectMockServer(testEnvironment)
 	require.NoError(t, err, "Creating mockserver clients shouldn't fail")
 
 	t.Cleanup(func() {
-		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, chainClient)
+		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, zapcore.ErrorLevel, chainClient)
 		require.NoError(t, err, "Error tearing down environment")
 	})
 	chainClient.ParallelTransactions(true)
@@ -46,30 +53,37 @@ func TestOCRBasic(t *testing.T) {
 	linkTokenContract, err := contractDeployer.DeployLinkTokenContract()
 	require.NoError(t, err, "Deploying Link Token Contract shouldn't fail")
 
-	err = actions.FundChainlinkNodes(chainlinkNodes, chainClient, big.NewFloat(.05))
+	err = actions.FundChainlinkNodes(workerNodes, chainClient, big.NewFloat(.05))
 	require.NoError(t, err, "Error funding Chainlink nodes")
 
-	ocrInstances := actions.DeployOCRContracts(t, 1, linkTokenContract, contractDeployer, chainlinkNodes, chainClient)
+	ocrInstances, err := actions.DeployOCRContracts(1, linkTokenContract, contractDeployer, bootstrapNode, workerNodes, chainClient)
+	require.NoError(t, err)
 	err = chainClient.WaitForEvents()
 	require.NoError(t, err, "Error waiting for events")
 
-	actions.SetAllAdapterResponsesToTheSameValue(t, 5, ocrInstances, chainlinkNodes, mockServer)
-	actions.CreateOCRJobs(t, ocrInstances, chainlinkNodes, mockServer)
-	actions.StartNewRound(t, 1, ocrInstances, chainClient)
+	err = actions.CreateOCRJobs(ocrInstances, bootstrapNode, workerNodes, "ocr", 5, mockServer)
+	require.NoError(t, err)
+	err = actions.StartNewRound(1, ocrInstances, chainClient)
+	require.NoError(t, err)
 
 	answer, err := ocrInstances[0].GetLatestAnswer(context.Background())
 	require.NoError(t, err, "Getting latest answer from OCR contract shouldn't fail")
 	require.Equal(t, int64(5), answer.Int64(), "Expected latest answer from OCR contract to be 5 but got %d", answer.Int64())
 
-	actions.SetAllAdapterResponsesToTheSameValue(t, 10, ocrInstances, chainlinkNodes, mockServer)
-	actions.StartNewRound(t, 2, ocrInstances, chainClient)
+	err = mockServer.SetValuePath("ocr", 10)
+	require.NoError(t, err)
+	err = actions.StartNewRound(2, ocrInstances, chainClient)
+	require.NoError(t, err)
 
 	answer, err = ocrInstances[0].GetLatestAnswer(context.Background())
 	require.NoError(t, err, "Error getting latest OCR answer")
 	require.Equal(t, int64(10), answer.Int64(), "Expected latest answer from OCR contract to be 10 but got %d", answer.Int64())
 }
 
-func setupOCRTest(t *testing.T) (testEnvironment *environment.Environment, testNetwork blockchain.EVMNetwork) {
+func setupOCRTest(t *testing.T) (
+	testEnvironment *environment.Environment,
+	testNetwork blockchain.EVMNetwork,
+) {
 	testNetwork = networks.SelectedNetwork
 	evmConfig := ethereum.New(nil)
 	if !testNetwork.Simulated {
@@ -79,24 +93,19 @@ func setupOCRTest(t *testing.T) (testEnvironment *environment.Environment, testN
 			WsURLs:      testNetwork.URLs,
 		})
 	}
-	baseTOML := `[OCR]
-Enabled = true
+	chainlinkChart := chainlink.New(0, map[string]interface{}{
+		"toml":     client.AddNetworksConfig(config.BaseOCRP2PV1Config, testNetwork),
+		"replicas": 6,
+	})
 
-[P2P]
-[P2P.V1]
-Enabled = true
-ListenIP = '0.0.0.0'
-ListenPort = 6690`
 	testEnvironment = environment.New(&environment.Config{
 		NamespacePrefix: fmt.Sprintf("smoke-ocr-%s", strings.ReplaceAll(strings.ToLower(testNetwork.Name), " ", "-")),
+		Test:            t,
 	}).
 		AddHelm(mockservercfg.New(nil)).
 		AddHelm(mockserver.New(nil)).
 		AddHelm(evmConfig).
-		AddHelm(chainlink.New(0, map[string]interface{}{
-			"toml":     client.AddNetworksConfig(baseTOML, testNetwork),
-			"replicas": 6,
-		}))
+		AddHelm(chainlinkChart)
 	err := testEnvironment.Run()
 	require.NoError(t, err, "Error running test environment")
 	return testEnvironment, testNetwork

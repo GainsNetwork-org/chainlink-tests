@@ -8,16 +8,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/onsi/gomega"
-	"github.com/rs/zerolog/log"
-	uuid "github.com/satori/go.uuid"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/smartcontractkit/chainlink-env/environment"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/ethereum"
 	"github.com/smartcontractkit/chainlink-testing-framework/blockchain"
 	"github.com/smartcontractkit/chainlink-testing-framework/utils"
+
 	networks "github.com/smartcontractkit/chainlink/integration-tests"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
@@ -26,7 +27,11 @@ import (
 
 func TestVRFBasic(t *testing.T) {
 	t.Parallel()
+	l := utils.GetTestLogger(t)
 	testEnvironment, testNetwork := setupVRFTest(t)
+	if testEnvironment.WillUseRemoteRunner() {
+		return
+	}
 
 	chainClient, err := blockchain.NewEVMClient(testNetwork, testEnvironment)
 	require.NoError(t, err, "Connecting client shouldn't fail")
@@ -35,7 +40,7 @@ func TestVRFBasic(t *testing.T) {
 	chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
 	require.NoError(t, err, "Connecting to chainlink nodes shouldn't fail")
 	t.Cleanup(func() {
-		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, chainClient)
+		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, zapcore.ErrorLevel, chainClient)
 		require.NoError(t, err, "Error tearing down environment")
 	})
 	chainClient.ParallelTransactions(true)
@@ -64,9 +69,9 @@ func TestVRFBasic(t *testing.T) {
 	for _, n := range chainlinkNodes {
 		nodeKey, err := n.MustCreateVRFKey()
 		require.NoError(t, err, "Creating VRF key shouldn't fail")
-		log.Debug().Interface("Key JSON", nodeKey).Msg("Created proving key")
+		l.Debug().Interface("Key JSON", nodeKey).Msg("Created proving key")
 		pubKeyCompressed := nodeKey.Data.ID
-		jobUUID := uuid.NewV4()
+		jobUUID := uuid.New()
 		os := &client.VRFTxPipelineSpec{
 			Address: coordinator.Address(),
 		}
@@ -116,9 +121,9 @@ func TestVRFBasic(t *testing.T) {
 			// TODO: This is an imperfect check, given it's a random number, it CAN be 0, but chances are unlikely.
 			// So we're just checking that the answer has changed to something other than the default (0)
 			// There's a better formula to ensure that VRF response is as expected, detailed under Technical Walkthrough.
-			// https://blog.chain.link/chainlink-vrf-on-chain-verifiable-randomness/
+			// https://bl.chain.link/chainlink-vrf-on-chain-verifiable-randomness/
 			g.Expect(out.Uint64()).ShouldNot(gomega.BeNumerically("==", 0), "Expected the VRF job give an answer other than 0")
-			log.Debug().Uint64("Output", out.Uint64()).Msg("Randomness fulfilled")
+			l.Debug().Uint64("Output", out.Uint64()).Msg("Randomness fulfilled")
 		}, timeout, "1s").Should(gomega.Succeed())
 	}
 }
@@ -135,6 +140,7 @@ func setupVRFTest(t *testing.T) (testEnvironment *environment.Environment, testN
 	}
 	testEnvironment = environment.New(&environment.Config{
 		NamespacePrefix: fmt.Sprintf("smoke-vrf-%s", strings.ReplaceAll(strings.ToLower(testNetwork.Name), " ", "-")),
+		Test:            t,
 	}).
 		AddHelm(evmConfig).
 		AddHelm(chainlink.New(0, map[string]interface{}{

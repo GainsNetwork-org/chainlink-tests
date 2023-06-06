@@ -2,7 +2,7 @@
 
 pragma solidity 0.8.6;
 
-import "../upkeeps/CronUpkeep.sol";
+import "../automation/upkeeps/CronUpkeep.sol";
 import {Cron, Spec} from "../libraries/internal/Cron.sol";
 
 /**
@@ -26,11 +26,7 @@ contract CronUpkeepTestHelper is CronUpkeep {
    * directly from strings. This is gas-intensive and shouldn't be done outside
    * of testing environments.
    */
-  function createCronJobFromString(
-    address target,
-    bytes memory handler,
-    string memory cronString
-  ) external {
+  function createCronJobFromString(address target, bytes memory handler, string memory cronString) external {
     Spec memory spec = cronString.toSpec();
     createCronJobFromSpec(target, handler, spec);
   }

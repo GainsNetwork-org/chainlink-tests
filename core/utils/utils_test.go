@@ -7,20 +7,20 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/pkg/errors"
 
-	"github.com/smartcontractkit/chainlink/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/utils"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/atomic"
 	"go.uber.org/multierr"
 )
 
@@ -545,7 +545,7 @@ func TestRetryWithBackoff(t *testing.T) {
 	})
 
 	retry := func() bool {
-		return counter.Inc() < 3
+		return counter.Add(1) < 3
 	}
 
 	go utils.RetryWithBackoff(ctx, retry)
@@ -690,7 +690,7 @@ func TestContextFromChan(t *testing.T) {
 	}
 }
 
-func TestContextFromChanWithDeadline(t *testing.T) {
+func TestContextFromChanWithTimeout(t *testing.T) {
 	t.Parallel()
 
 	assertCtxCancelled := func(ctx context.Context, t *testing.T) {
@@ -705,7 +705,7 @@ func TestContextFromChanWithDeadline(t *testing.T) {
 		t.Parallel()
 
 		ch := make(chan struct{})
-		ctx, cancel := utils.ContextFromChanWithDeadline(ch, testutils.TestInterval)
+		ctx, cancel := utils.ContextFromChanWithTimeout(ch, testutils.TestInterval)
 		defer cancel()
 
 		assertCtxCancelled(ctx, t)
@@ -715,7 +715,7 @@ func TestContextFromChanWithDeadline(t *testing.T) {
 		t.Parallel()
 
 		ch := make(chan struct{})
-		ctx, cancel := utils.ContextFromChanWithDeadline(ch, testutils.WaitTimeout(t))
+		ctx, cancel := utils.ContextFromChanWithTimeout(ch, testutils.WaitTimeout(t))
 		defer cancel()
 
 		ch <- struct{}{}
@@ -740,7 +740,7 @@ func TestStartStopOnce(t *testing.T) {
 
 	var callsCount atomic.Int32
 	incCount := func() {
-		callsCount.Inc()
+		callsCount.Add(1)
 	}
 
 	var s utils.StartStopOnce
@@ -771,7 +771,7 @@ func TestStartStopOnce_StartErrors(t *testing.T) {
 
 	var callsCount atomic.Int32
 	incCount := func() {
-		callsCount.Inc()
+		callsCount.Add(1)
 	}
 
 	assert.False(t, s.IfStarted(incCount))
@@ -795,7 +795,7 @@ func TestStartStopOnce_StopErrors(t *testing.T) {
 
 	var callsCount atomic.Int32
 	incCount := func() {
-		callsCount.Inc()
+		callsCount.Add(1)
 	}
 
 	err = s.StopOnce("foo", func() error { return errors.New("explodey mcsplode") })
@@ -894,7 +894,7 @@ func TestPausableTicker(t *testing.T) {
 
 	followNTicks := func(n int32, awaiter cltest.Awaiter) {
 		for range pt.Ticks() {
-			if counter.Inc() == n {
+			if counter.Add(1) == n {
 				awaiter.ItHappened()
 			}
 		}
@@ -930,7 +930,7 @@ func TestCronTicker(t *testing.T) {
 
 	go func() {
 		for range ct.Ticks() {
-			if counter.Inc() == 2 {
+			if counter.Add(1) == 2 {
 				awaiter.ItHappened()
 			}
 		}
@@ -982,4 +982,67 @@ func TestTryParseHex(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, []byte{0x1, 0x23}, b)
 	})
+}
+
+func TestErrorBuffer(t *testing.T) {
+	t.Parallel()
+
+	err1 := errors.New("err1")
+	err2 := errors.New("err2")
+	err3 := errors.New("err3")
+
+	t.Run("happy path", func(t *testing.T) {
+		t.Parallel()
+		buff := utils.ErrorBuffer{}
+		buff.Append(err1)
+		buff.Append(err2)
+		combined := buff.Flush()
+		errs := utils.UnwrapError(combined)
+		assert.Equal(t, 2, len(errs))
+		assert.Equal(t, err1.Error(), errs[0].Error())
+		assert.Equal(t, err2.Error(), errs[1].Error())
+	})
+
+	t.Run("ovewrite oldest error when cap exceeded", func(t *testing.T) {
+		t.Parallel()
+		buff := utils.ErrorBuffer{}
+		buff.SetCap(2)
+		buff.Append(err1)
+		buff.Append(err2)
+		buff.Append(err3)
+		combined := buff.Flush()
+		errs := utils.UnwrapError(combined)
+		assert.Equal(t, 2, len(errs))
+		assert.Equal(t, err2.Error(), errs[0].Error())
+		assert.Equal(t, err3.Error(), errs[1].Error())
+	})
+
+	t.Run("does not overwrite the buffer if cap == 0", func(t *testing.T) {
+		t.Parallel()
+		buff := utils.ErrorBuffer{}
+		for i := 1; i <= 20; i++ {
+			buff.Append(errors.Errorf("err#%d", i))
+		}
+
+		combined := buff.Flush()
+		errs := utils.UnwrapError(combined)
+		assert.Equal(t, 20, len(errs))
+		assert.Equal(t, "err#20", errs[19].Error())
+	})
+
+	t.Run("UnwrapError returns the a single element err array if passed err is not a joinedError", func(t *testing.T) {
+		t.Parallel()
+		errs := utils.UnwrapError(err1)
+		assert.Equal(t, 1, len(errs))
+		assert.Equal(t, err1.Error(), errs[0].Error())
+	})
+
+	t.Run("flushing an empty err buffer is a nil error", func(t *testing.T) {
+		t.Parallel()
+		buff := utils.ErrorBuffer{}
+
+		combined := buff.Flush()
+		require.Nil(t, combined)
+	})
+
 }

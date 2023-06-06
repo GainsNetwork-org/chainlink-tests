@@ -8,12 +8,15 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+
+	"github.com/smartcontractkit/libocr/gethwrappers/offchainaggregator"
+	"github.com/smartcontractkit/libocr/gethwrappers2/ocr2aggregator"
 	ocrConfigHelper "github.com/smartcontractkit/libocr/offchainreporting/confighelper"
 	ocrConfigHelper2 "github.com/smartcontractkit/libocr/offchainreporting2/confighelper"
 
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/operator_factory"
-
-	"github.com/smartcontractkit/chainlink-testing-framework/contracts/ethereum"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/flux_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/functions_billing_registry_events_mock"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/operator_factory"
 
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
 )
@@ -56,7 +59,7 @@ type FluxAggregator interface {
 	Address() string
 	Fund(ethAmount *big.Float) error
 	LatestRoundID(ctx context.Context) (*big.Int, error)
-	LatestRoundData(ctx context.Context) (RoundData, error)
+	LatestRoundData(ctx context.Context) (flux_aggregator_wrapper.LatestRoundData, error)
 	GetContractData(ctxt context.Context) (*FluxAggregatorData, error)
 	UpdateAvailableFunds() error
 	PaymentAmount(ctx context.Context) (*big.Int, error)
@@ -142,8 +145,21 @@ type OffchainAggregator interface {
 	GetLatestAnswer(ctx context.Context) (*big.Int, error)
 	GetLatestRound(ctx context.Context) (*RoundData, error)
 	GetRound(ctx context.Context, roundID *big.Int) (*RoundData, error)
-	ParseEventAnswerUpdated(log types.Log) (*ethereum.OffchainAggregatorAnswerUpdated, error)
+	ParseEventAnswerUpdated(log types.Log) (*offchainaggregator.OffchainAggregatorAnswerUpdated, error)
 	LatestRoundDataUpdatedAt() (*big.Int, error)
+}
+
+type OffchainAggregatorV2 interface {
+	Address() string
+	Fund(nativeAmount *big.Float) error
+	RequestNewRound() error
+	SetConfig(ocrConfig *OCRv2Config) error
+	GetConfig(ctx context.Context) ([32]byte, uint32, error)
+	SetPayees(transmitters, payees []string) error
+	GetLatestAnswer(ctx context.Context) (*big.Int, error)
+	GetLatestRound(ctx context.Context) (*RoundData, error)
+	GetRound(ctx context.Context, roundID *big.Int) (*RoundData, error)
+	ParseEventAnswerUpdated(log types.Log) (*ocr2aggregator.OCR2AggregatorAnswerUpdated, error)
 }
 
 type Oracle interface {
@@ -165,17 +181,11 @@ type APIConsumer interface {
 		path string,
 		times *big.Int,
 	) error
-	WatchPerfEvents(ctx context.Context, eventChan chan<- *PerfEvent) error
 }
 
 type Storage interface {
 	Get(ctxt context.Context) (*big.Int, error)
 	Set(*big.Int) error
-}
-
-type VRF interface {
-	Fund(ethAmount *big.Float) error
-	ProofLength(context.Context) (*big.Int, error)
 }
 
 // JobByInstance helper struct to match job + instance ID
@@ -198,54 +208,6 @@ type BlockHashStore interface {
 	Address() string
 }
 
-type VRFCoordinator interface {
-	RegisterProvingKey(
-		fee *big.Int,
-		oracleAddr string,
-		publicProvingKey [2]*big.Int,
-		jobID [32]byte,
-	) error
-	HashOfKey(ctx context.Context, pubKey [2]*big.Int) ([32]byte, error)
-	Address() string
-}
-
-type VRFCoordinatorV2 interface {
-	SetConfig(
-		minimumRequestConfirmations uint16,
-		maxGasLimit uint32,
-		stalenessSeconds uint32,
-		gasAfterPaymentCalculation uint32,
-		fallbackWeiPerUnitLink *big.Int, feeConfig ethereum.VRFCoordinatorV2FeeConfig,
-	) error
-	RegisterProvingKey(
-		oracleAddr string,
-		publicProvingKey [2]*big.Int,
-	) error
-	HashOfKey(ctx context.Context, pubKey [2]*big.Int) ([32]byte, error)
-	Address() string
-}
-
-type VRFConsumer interface {
-	Address() string
-	RequestRandomness(hash [32]byte, fee *big.Int) error
-	CurrentRoundID(ctx context.Context) (*big.Int, error)
-	RandomnessOutput(ctx context.Context) (*big.Int, error)
-	WatchPerfEvents(ctx context.Context, eventChan chan<- *PerfEvent) error
-	Fund(ethAmount *big.Float) error
-}
-
-type VRFConsumerV2 interface {
-	Address() string
-	CurrentSubscription() (uint64, error)
-	CreateFundedSubscription(funds *big.Int) error
-	TopUpSubscriptionFunds(funds *big.Int) error
-	RequestRandomness(hash [32]byte, subID uint64, confs uint16, gasLimit uint32, numWords uint32) error
-	RandomnessOutput(ctx context.Context, arg0 *big.Int) (*big.Int, error)
-	GetAllRandomWords(ctx context.Context, num int) ([]*big.Int, error)
-	GasAvailable() (*big.Int, error)
-	Fund(ethAmount *big.Float) error
-}
-
 type Staking interface {
 	Address() string
 	Fund(ethAmount *big.Float) error
@@ -255,6 +217,27 @@ type Staking interface {
 	RaiseAlert() error
 	Start(amount *big.Int, initialRewardRate *big.Int) error
 	SetMerkleRoot(newMerkleRoot [32]byte) error
+}
+
+type FunctionsOracleEventsMock interface {
+	Address() string
+	OracleResponse(requestId [32]byte) error
+	OracleRequest(requestId [32]byte, requestingContract common.Address, requestInitiator common.Address, subscriptionId uint64, subscriptionOwner common.Address, data []byte) error
+	UserCallbackError(requestId [32]byte, reason string) error
+	UserCallbackRawError(requestId [32]byte, lowLevelData []byte) error
+}
+
+type FunctionsBillingRegistryEventsMock interface {
+	Address() string
+	SubscriptionFunded(subscriptionId uint64, oldBalance *big.Int, newBalance *big.Int) error
+	BillingStart(requestId [32]byte, commitment functions_billing_registry_events_mock.FunctionsBillingRegistryEventsMockCommitment) error
+	BillingEnd(requestId [32]byte, subscriptionId uint64, signerPayment *big.Int, transmitterPayment *big.Int, totalCost *big.Int, success bool) error
+}
+
+type MockAggregatorProxy interface {
+	Address() string
+	UpdateAggregator(aggregator common.Address) error
+	Aggregator() (common.Address, error)
 }
 
 type RoundData struct {
@@ -276,21 +259,6 @@ type ReadAccessController interface {
 type Flags interface {
 	Address() string
 	GetFlag(ctx context.Context, addr string) (bool, error)
-}
-
-// DeviationFlaggingValidator contract used as an external validator,
-// fox ex. in flux monitor rounds validation
-type DeviationFlaggingValidator interface {
-	Address() string
-}
-
-// PerfEvent is used to get some metrics for contracts,
-// it contrains roundID for Keeper/OCR/Flux tests and request id for VRF/Runlog
-type PerfEvent struct {
-	Contract       DeviationFlaggingValidator
-	Round          *big.Int
-	RequestID      [32]byte
-	BlockTimestamp *big.Int
 }
 
 // OperatorFactory creates Operator contracts for node operators

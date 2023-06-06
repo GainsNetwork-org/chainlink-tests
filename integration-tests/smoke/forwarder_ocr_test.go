@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/smartcontractkit/chainlink-env/environment"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
@@ -28,6 +29,9 @@ import (
 func TestForwarderOCRBasic(t *testing.T) {
 	t.Parallel()
 	testEnvironment, testNetwork := setupForwarderOCRTest(t)
+	if testEnvironment.WillUseRemoteRunner() {
+		return
+	}
 
 	chainClient, err := blockchain.NewEVMClient(testNetwork, testEnvironment)
 	require.NoError(t, err, "Connecting to blockchain nodes shouldn't fail")
@@ -37,13 +41,14 @@ func TestForwarderOCRBasic(t *testing.T) {
 	require.NoError(t, err, "Loading contracts shouldn't fail")
 	chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
 	require.NoError(t, err, "Connecting to chainlink nodes shouldn't fail")
-	nodeAddresses, err := actions.ChainlinkNodeAddresses(chainlinkNodes)
+	bootstrapNode, workerNodes := chainlinkNodes[0], chainlinkNodes[1:]
+	workerNodeAddresses, err := actions.ChainlinkNodeAddresses(workerNodes)
 	require.NoError(t, err, "Retreiving on-chain wallet addresses for chainlink nodes shouldn't fail")
 	mockServer, err := ctfClient.ConnectMockServer(testEnvironment)
 	require.NoError(t, err, "Creating mockserver clients shouldn't fail")
 
 	t.Cleanup(func() {
-		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, chainClient)
+		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, zapcore.ErrorLevel, chainClient)
 		require.NoError(t, err, "Error tearing down environment")
 	})
 	chainClient.ParallelTransactions(true)
@@ -51,31 +56,29 @@ func TestForwarderOCRBasic(t *testing.T) {
 	linkTokenContract, err := contractDeployer.DeployLinkTokenContract()
 	require.NoError(t, err, "Deploying Link Token Contract shouldn't fail")
 
-	err = actions.FundChainlinkNodes(chainlinkNodes, chainClient, big.NewFloat(.05))
+	err = actions.FundChainlinkNodes(workerNodes, chainClient, big.NewFloat(.05))
 	require.NoError(t, err, "Error funding Chainlink nodes")
 
 	operators, authorizedForwarders, _ := actions.DeployForwarderContracts(
-		t, contractDeployer, linkTokenContract, chainClient, len(chainlinkNodes)-1,
+		t, contractDeployer, linkTokenContract, chainClient, len(workerNodes),
 	)
-	forwarderNodes := chainlinkNodes[1:]
-	forwarderNodesAddresses := nodeAddresses[1:]
-	for i := range forwarderNodes {
+	for i := range workerNodes {
 		actions.AcceptAuthorizedReceiversOperator(
-			t, operators[i], authorizedForwarders[i], []common.Address{forwarderNodesAddresses[i]}, chainClient, contractLoader,
+			t, operators[i], authorizedForwarders[i], []common.Address{workerNodeAddresses[i]}, chainClient, contractLoader,
 		)
 		require.NoError(t, err, "Accepting Authorize Receivers on Operator shouldn't fail")
-		actions.TrackForwarder(t, chainClient, authorizedForwarders[i], forwarderNodes[i])
+		actions.TrackForwarder(t, chainClient, authorizedForwarders[i], workerNodes[i])
 		err = chainClient.WaitForEvents()
 	}
 	ocrInstances := actions.DeployOCRContractsForwarderFlow(
-		t, 1, linkTokenContract, contractDeployer, chainlinkNodes, authorizedForwarders, chainClient,
+		t, 1, linkTokenContract, contractDeployer, workerNodes, authorizedForwarders, chainClient,
 	)
 	err = chainClient.WaitForEvents()
 	require.NoError(t, err, "Error waiting for events")
 
-	actions.SetAllAdapterResponsesToTheSameValue(t, 5, ocrInstances, chainlinkNodes, mockServer)
-	actions.CreateOCRJobsWithForwarder(t, ocrInstances, chainlinkNodes, mockServer)
-	actions.StartNewRound(t, 1, ocrInstances, chainClient)
+	actions.CreateOCRJobsWithForwarder(t, ocrInstances, bootstrapNode, workerNodes, "ocr_forwarder", 5, mockServer)
+	err = actions.StartNewRound(1, ocrInstances, chainClient)
+	require.NoError(t, err)
 	err = chainClient.WaitForEvents()
 	require.NoError(t, err, "Error waiting for events")
 
@@ -83,8 +86,10 @@ func TestForwarderOCRBasic(t *testing.T) {
 	require.NoError(t, err, "Getting latest answer from OCR contract shouldn't fail")
 	require.Equal(t, int64(5), answer.Int64(), "Expected latest answer from OCR contract to be 5 but got %d", answer.Int64())
 
-	actions.SetAllAdapterResponsesToTheSameValue(t, 10, ocrInstances, chainlinkNodes, mockServer)
-	actions.StartNewRound(t, 2, ocrInstances, chainClient)
+	err = mockServer.SetValuePath("ocr_forwarder", 10)
+	require.NoError(t, err)
+	err = actions.StartNewRound(2, ocrInstances, chainClient)
+	require.NoError(t, err)
 	err = chainClient.WaitForEvents()
 	require.NoError(t, err, "Error waiting for events")
 
@@ -118,6 +123,7 @@ ListenPort = 6690`
 ForwardersEnabled = true`
 	testEnvironment = environment.New(&environment.Config{
 		NamespacePrefix: fmt.Sprintf("smoke-ocr-forwarder-%s", strings.ReplaceAll(strings.ToLower(testNetwork.Name), " ", "-")),
+		Test:            t,
 	}).
 		AddHelm(mockservercfg.New(nil)).
 		AddHelm(mockserver.New(nil)).

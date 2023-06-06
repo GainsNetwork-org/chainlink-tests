@@ -3,6 +3,7 @@ package client_test
 import (
 	"fmt"
 	"math/big"
+	"net/url"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -15,12 +16,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"github.com/smartcontractkit/chainlink/core/chains/evm/client/mocks"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
 
-	"github.com/smartcontractkit/chainlink/core/assets"
-	evmclient "github.com/smartcontractkit/chainlink/core/chains/evm/client"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	evmclient "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
 )
 
 func TestNewSendOnlyNode(t *testing.T) {
@@ -52,7 +54,7 @@ func TestStartSendOnlyNode(t *testing.T) {
 		url := r.newHTTPServer(t)
 		lggr, observedLogs := logger.TestLoggerObserved(t, zap.WarnLevel)
 		s := evmclient.NewSendOnlyNode(lggr, *url, t.Name(), chainID)
-		defer s.Close()
+		defer func() { assert.NoError(t, s.Close()) }()
 		err := s.Start(testutils.Context(t))
 		assert.NoError(t, err)                 // No errors expected
 		assert.Equal(t, 0, observedLogs.Len()) // No warnings expected
@@ -66,12 +68,25 @@ func TestStartSendOnlyNode(t *testing.T) {
 		url := r.newHTTPServer(t)
 		s := evmclient.NewSendOnlyNode(lggr, *url, t.Name(), testutils.FixtureChainID)
 
-		defer s.Close()
+		defer func() { assert.NoError(t, s.Close()) }()
 		err := s.Start(testutils.Context(t))
 		assert.NoError(t, err)
-		// getChainID() should return Error if ChainID = 0
-		// This should get converted into a warning from Start()
+		// If ChainID = 0, this should get converted into a warning from Start()
 		testutils.WaitForLogMessage(t, observedLogs, "ChainID verification skipped")
+	})
+
+	t.Run("becomes unusable (and remains undialed) if initial dial fails", func(t *testing.T) {
+		t.Parallel()
+		lggr, observedLogs := logger.TestLoggerObserved(t, zap.WarnLevel)
+		invalidURL := url.URL{Scheme: "some rubbish", Host: "not a valid host"}
+		s := evmclient.NewSendOnlyNode(lggr, invalidURL, t.Name(), testutils.FixtureChainID)
+
+		defer func() { assert.NoError(t, s.Close()) }()
+		err := s.Start(testutils.Context(t))
+		require.NoError(t, err)
+
+		assert.False(t, client.IsDialed(s))
+		testutils.RequireLogMessage(t, observedLogs, "Dial failed: EVM SendOnly Node is unusable")
 	})
 }
 

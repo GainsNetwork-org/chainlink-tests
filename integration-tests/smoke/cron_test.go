@@ -5,7 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zapcore"
+
 	"github.com/smartcontractkit/chainlink-env/environment"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/chainlink"
 	"github.com/smartcontractkit/chainlink-env/pkg/helm/ethereum"
@@ -13,17 +17,18 @@ import (
 	mockservercfg "github.com/smartcontractkit/chainlink-env/pkg/helm/mockserver-cfg"
 	ctfClient "github.com/smartcontractkit/chainlink-testing-framework/client"
 	"github.com/smartcontractkit/chainlink-testing-framework/utils"
+
 	networks "github.com/smartcontractkit/chainlink/integration-tests"
 	"github.com/smartcontractkit/chainlink/integration-tests/actions"
 	"github.com/smartcontractkit/chainlink/integration-tests/client"
-	"github.com/stretchr/testify/require"
-
-	uuid "github.com/satori/go.uuid"
 )
 
 func TestCronBasic(t *testing.T) {
 	t.Parallel()
 	testEnvironment := setupCronTest(t)
+	if testEnvironment.WillUseRemoteRunner() {
+		return
+	}
 
 	chainlinkNodes, err := client.ConnectChainlinkNodes(testEnvironment)
 	require.NoError(t, err, "Connecting to chainlink nodes shouldn't fail")
@@ -34,16 +39,16 @@ func TestCronBasic(t *testing.T) {
 	require.NoError(t, err, "Setting value path in mockserver shouldn't fail")
 	// Register cleanup for any test
 	t.Cleanup(func() {
-		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, nil)
+		err := actions.TeardownSuite(t, testEnvironment, utils.ProjectRoot, chainlinkNodes, nil, zapcore.ErrorLevel, nil)
 		require.NoError(t, err, "Error tearing down environment")
 	})
 
-	bta := client.BridgeTypeAttributes{
-		Name:        fmt.Sprintf("variable-%s", uuid.NewV4().String()),
+	bta := &client.BridgeTypeAttributes{
+		Name:        fmt.Sprintf("variable-%s", uuid.New().String()),
 		URL:         fmt.Sprintf("%s/variable", mockServer.Config.ClusterURL),
 		RequestData: "{}",
 	}
-	err = chainlinkNode.MustCreateBridge(&bta)
+	err = chainlinkNode.MustCreateBridge(bta)
 	require.NoError(t, err, "Creating bridge in chainlink node shouldn't fail")
 
 	job, err := chainlinkNode.MustCreateJob(&client.CronJobSpec{
@@ -77,6 +82,7 @@ func setupCronTest(t *testing.T) (testEnvironment *environment.Environment) {
 	}
 	testEnvironment = environment.New(&environment.Config{
 		NamespacePrefix: fmt.Sprintf("smoke-cron-%s", strings.ReplaceAll(strings.ToLower(network.Name), " ", "-")),
+		Test:            t,
 	}).
 		AddHelm(mockservercfg.New(nil)).
 		AddHelm(mockserver.New(nil)).

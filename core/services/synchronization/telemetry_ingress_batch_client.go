@@ -6,20 +6,20 @@ import (
 	"fmt"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smartcontractkit/wsrpc"
 	"github.com/smartcontractkit/wsrpc/examples/simple/keys"
-	"go.uber.org/atomic"
 
-	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/services"
-	"github.com/smartcontractkit/chainlink/core/services/keystore"
-	telemPb "github.com/smartcontractkit/chainlink/core/services/synchronization/telem"
-	"github.com/smartcontractkit/chainlink/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
+	telemPb "github.com/smartcontractkit/chainlink/v2/core/services/synchronization/telem"
+	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
-//go:generate mockery --quiet --dir ./telem --name TelemClient --output ./mocks/ --case=underscore
+//go:generate mockery --quiet --name TelemetryIngressBatchClient --output ./mocks --case=underscore
 
 // TelemetryIngressBatchClient encapsulates all the functionality needed to
 // send telemetry to the ingress server using wsrpc
@@ -41,7 +41,8 @@ func (NoopTelemetryIngressBatchClient) Close() error { return nil }
 func (NoopTelemetryIngressBatchClient) Send(TelemPayload) {}
 
 // Healthy is a no-op
-func (NoopTelemetryIngressBatchClient) Healthy() error { return nil }
+func (NoopTelemetryIngressBatchClient) HealthReport() map[string]error { return map[string]error{} }
+func (NoopTelemetryIngressBatchClient) Name() string                   { return "NoopTelemetryIngressBatchClient" }
 
 // Ready is a no-op
 func (NoopTelemetryIngressBatchClient) Ready() error { return nil }
@@ -52,7 +53,7 @@ type telemetryIngressBatchClient struct {
 	ks              keystore.CSA
 	serverPubKeyHex string
 
-	connected   *atomic.Bool
+	connected   atomic.Bool
 	telemClient telemPb.TelemClient
 	close       func() error
 
@@ -89,7 +90,6 @@ func NewTelemetryIngressBatchClient(url *url.URL, serverPubKeyHex string, ks key
 		logging:           logging,
 		lggr:              lggr.Named("TelemetryIngressBatchClient"),
 		chDone:            make(chan struct{}),
-		connected:         atomic.NewBool(false),
 		workers:           make(map[string]*telemetryIngressBatchWorker),
 		useUniConn:        useUniconn,
 	}
@@ -123,6 +123,7 @@ func (tc *telemetryIngressBatchClient) Start(ctx context.Context) error {
 							tc.lggr.Warnw("gave up connecting to telemetry endpoint", "err", err)
 						} else {
 							tc.lggr.Criticalw("telemetry endpoint dial errored unexpectedly", "err", err)
+							tc.SvcErrBuffer.Append(err)
 						}
 					} else {
 						tc.telemClient = telemPb.NewTelemClient(conn)
@@ -132,9 +133,9 @@ func (tc *telemetryIngressBatchClient) Start(ctx context.Context) error {
 				}()
 			} else {
 				// Spawns a goroutine that will eventually connect
-				conn, err := wsrpc.DialWithContext(ctx, tc.url.String(), wsrpc.WithTransportCreds(clientPrivKey, serverPubKey))
+				conn, err := wsrpc.DialWithContext(ctx, tc.url.String(), wsrpc.WithTransportCreds(clientPrivKey, serverPubKey), wsrpc.WithLogger(tc.lggr))
 				if err != nil {
-					return fmt.Errorf("Could not start TelemIngressBatchClient, Dial returned error: %v", err)
+					return fmt.Errorf("could not start TelemIngressBatchClient, Dial returned error: %v", err)
 				}
 				tc.telemClient = telemPb.NewTelemClient(conn)
 				tc.close = func() error { conn.Close(); return nil }
@@ -155,6 +156,14 @@ func (tc *telemetryIngressBatchClient) Close() error {
 		}
 		return nil
 	})
+}
+
+func (tc *telemetryIngressBatchClient) Name() string {
+	return tc.lggr.Name()
+}
+
+func (tc *telemetryIngressBatchClient) HealthReport() map[string]error {
+	return map[string]error{tc.Name(): tc.StartStopOnce.Healthy()}
 }
 
 // getCSAPrivateKey gets the client's CSA private key
@@ -194,7 +203,8 @@ func (tc *telemetryIngressBatchClient) findOrCreateWorker(payload TelemPayload) 
 	tc.workersMutex.Lock()
 	defer tc.workersMutex.Unlock()
 
-	worker, found := tc.workers[payload.ContractID]
+	workerKey := fmt.Sprintf("%s_%s", payload.ContractID, payload.TelemType)
+	worker, found := tc.workers[workerKey]
 
 	if !found {
 		worker = NewTelemetryIngressBatchWorker(
@@ -206,11 +216,12 @@ func (tc *telemetryIngressBatchClient) findOrCreateWorker(payload TelemPayload) 
 			tc.chDone,
 			make(chan TelemPayload, tc.telemBufferSize),
 			payload.ContractID,
+			payload.TelemType,
 			tc.globalLogger,
 			tc.logging,
 		)
 		worker.Start()
-		tc.workers[payload.ContractID] = worker
+		tc.workers[workerKey] = worker
 	}
 
 	return worker

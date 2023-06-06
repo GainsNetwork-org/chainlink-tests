@@ -3,6 +3,7 @@ package log_test
 import (
 	"context"
 	"math/big"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,23 +14,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/atomic"
 
-	httypes "github.com/smartcontractkit/chainlink/core/chains/evm/headtracker/types"
-	"github.com/smartcontractkit/chainlink/core/chains/evm/log"
-	evmmocks "github.com/smartcontractkit/chainlink/core/chains/evm/mocks"
-	evmtypes "github.com/smartcontractkit/chainlink/core/chains/evm/types"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/flux_aggregator_wrapper"
-	"github.com/smartcontractkit/chainlink/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils"
-	configtest "github.com/smartcontractkit/chainlink/core/internal/testutils/configtest/v2"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
-	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/services/chainlink"
-	"github.com/smartcontractkit/chainlink/core/services/srvctest"
-	"github.com/smartcontractkit/chainlink/core/utils"
+	evmclimocks "github.com/smartcontractkit/chainlink/v2/core/chains/evm/client/mocks"
+	httypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/headtracker/types"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
+	evmtypes "github.com/smartcontractkit/chainlink/v2/core/chains/evm/types"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/flux_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	configtest "github.com/smartcontractkit/chainlink/v2/core/internal/testutils/configtest/v2"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/pgtest"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
+	"github.com/smartcontractkit/chainlink/v2/core/services/srvctest"
+	"github.com/smartcontractkit/chainlink/v2/core/utils"
 )
 
 func TestBroadcaster_AwaitsInitialSubscribersOnStartup(t *testing.T) {
@@ -166,7 +166,7 @@ func TestBroadcaster_BackfillOnNodeStartAndOnReplay(t *testing.T) {
 	// the first backfill should use the height of last head saved to the db,
 	// minus maxNumConfirmations of subscribers and minus blockBackfillDepth
 	mockEth.CheckFilterLogs = func(fromBlock int64, toBlock int64) {
-		times := backfillCount.Inc() - 1
+		times := backfillCount.Add(1) - 1
 		if times == 0 {
 			require.Equal(t, lastStoredBlockHeight-maxNumConfirmations-int64(blockBackfillDepth), fromBlock)
 		} else if times == 1 {
@@ -532,7 +532,7 @@ func TestBroadcaster_BackfillInBatches(t *testing.T) {
 	backfillStart := lastStoredBlockHeight - numConfirmations - int64(blockBackfillDepth)
 	// the first backfill should start from before the last stored head
 	mockEth.CheckFilterLogs = func(fromBlock int64, toBlock int64) {
-		times := backfillCount.Inc() - 1
+		times := backfillCount.Add(1) - 1
 		lggr.Infof("Log Batch: --------- times %v - %v, %v", times, fromBlock, toBlock)
 
 		if times <= 7 {
@@ -601,7 +601,7 @@ func TestBroadcaster_BackfillALargeNumberOfLogs(t *testing.T) {
 
 	lggr := logger.TestLogger(t)
 	mockEth.CheckFilterLogs = func(fromBlock int64, toBlock int64) {
-		times := backfillCount.Inc() - 1
+		times := backfillCount.Add(1) - 1
 		lggr.Warnf("Log Batch: --------- times %v - %v, %v", times, fromBlock, toBlock)
 	}
 
@@ -1135,7 +1135,7 @@ func TestBroadcaster_Register_ResubscribesToMostRecentlySeenBlock(t *testing.T) 
 		expectedBlock = 5
 	)
 	var (
-		ethClient = evmmocks.NewClient(t)
+		ethClient = evmclimocks.NewClient(t)
 		contract0 = newMockContract()
 		contract1 = newMockContract()
 		contract2 = newMockContract()
@@ -1143,7 +1143,7 @@ func TestBroadcaster_Register_ResubscribesToMostRecentlySeenBlock(t *testing.T) 
 	mockEth := &evmtest.MockEth{EthClient: ethClient}
 	chchRawLogs := make(chan evmtest.RawSub[types.Log], backfillTimes)
 	chStarted := make(chan struct{})
-	ethClient.On("ChainID", mock.Anything).Return(&cltest.FixtureChainID)
+	ethClient.On("ConfiguredChainID", mock.Anything).Return(&cltest.FixtureChainID)
 	ethClient.On("SubscribeFilterLogs", mock.Anything, mock.Anything, mock.Anything).
 		Return(
 			func(ctx context.Context, q ethereum.FilterQuery, ch chan<- types.Log) ethereum.Subscription {
@@ -1683,9 +1683,9 @@ func TestBroadcaster_BroadcastsWithZeroConfirmations(t *testing.T) {
 	testutils.SkipShortDB(t)
 	gm := gomega.NewWithT(t)
 
-	ethClient := evmmocks.NewClient(t)
+	ethClient := evmclimocks.NewClient(t)
 	mockEth := &evmtest.MockEth{EthClient: ethClient}
-	ethClient.On("ChainID").Return(big.NewInt(0)).Maybe()
+	ethClient.On("ConfiguredChainID").Return(big.NewInt(0)).Maybe()
 	logsChCh := make(chan evmtest.RawSub[types.Log])
 	ethClient.On("SubscribeFilterLogs", mock.Anything, mock.Anything, mock.Anything).
 		Return(

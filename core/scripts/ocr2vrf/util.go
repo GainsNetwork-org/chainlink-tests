@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/smartcontractkit/libocr/offchainreporting2/confighelper"
 	"github.com/smartcontractkit/libocr/offchainreporting2/types"
@@ -23,23 +25,53 @@ import (
 	"go.dedis.ch/kyber/v3/group/edwards25519"
 	"go.dedis.ch/kyber/v3/pairing"
 
-	"github.com/smartcontractkit/chainlink/core/cmd"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/authorized_forwarder"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/link_token_interface"
-	dkgContract "github.com/smartcontractkit/chainlink/core/gethwrappers/ocr2vrf/generated/dkg"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/ocr2vrf/generated/load_test_beacon_consumer"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/ocr2vrf/generated/vrf_beacon"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/ocr2vrf/generated/vrf_beacon_consumer"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/ocr2vrf/generated/vrf_coordinator"
-	"github.com/smartcontractkit/chainlink/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/cmd"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/authorized_forwarder"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/link_token_interface"
+	dkgContract "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ocr2vrf/generated/dkg"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ocr2vrf/generated/load_test_beacon_consumer"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ocr2vrf/generated/vrf_beacon"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ocr2vrf/generated/vrf_beacon_consumer"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ocr2vrf/generated/vrf_coordinator"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/ocr2vrf/generated/vrf_router"
+	"github.com/smartcontractkit/chainlink/v2/core/utils"
 
 	helpers "github.com/smartcontractkit/chainlink/core/scripts/common"
 )
 
 var (
-	suite pairing.Suite = &altbn_128.PairingSuite{}
-	g1                  = suite.G1()
-	g2                  = suite.G2()
+	suite              pairing.Suite = &altbn_128.PairingSuite{}
+	g1                               = suite.G1()
+	g2                               = suite.G2()
+	tomlConfigTemplate               = `
+	[P2P.V1]
+	Enabled = false
+
+	[P2P.V2]
+	Enabled = true
+	ListenAddresses = ["127.0.0.1:8000"]
+
+	[Feature]
+	LogPoller = true
+
+	[OCR2]
+	Enabled = true
+
+	[[EVM]]
+	FinalityDepth = 1
+	ChainID = '%d'
+
+	[EVM.Transactions]
+	ForwardersEnabled = %t
+
+	[EVM.HeadTracker]
+	HistoryDepth = 1
+
+	[[EVM.Nodes]]
+	Name = "chain1"
+	HTTPURL = "%s"
+	WSURL = "%s"
+	`
 )
 
 func deployDKG(e helpers.Environment) common.Address {
@@ -48,16 +80,32 @@ func deployDKG(e helpers.Environment) common.Address {
 	return helpers.ConfirmContractDeployed(context.Background(), e.Ec, tx, e.ChainID)
 }
 
-func deployVRFCoordinator(e helpers.Environment, beaconPeriodBlocks *big.Int, linkAddress string, linkEthFeed string) common.Address {
-	_, tx, _, err := vrf_coordinator.DeployVRFCoordinator(
+func deployVRFRouter(e helpers.Environment) common.Address {
+	_, tx, _, err := vrf_router.DeployVRFRouter(e.Owner, e.Ec)
+	helpers.PanicErr(err)
+	return helpers.ConfirmContractDeployed(context.Background(), e.Ec, tx, e.ChainID)
+}
+
+func deployVRFCoordinator(e helpers.Environment, beaconPeriodBlocks *big.Int, linkAddress, linkEthFeed, router string) (common.Address, *vrf_coordinator.VRFCoordinator) {
+	_, tx, coordinator, err := vrf_coordinator.DeployVRFCoordinator(
 		e.Owner,
 		e.Ec,
 		beaconPeriodBlocks,
 		common.HexToAddress(linkAddress),
 		common.HexToAddress(linkEthFeed),
+		common.HexToAddress(router),
 	)
 	helpers.PanicErr(err)
-	return helpers.ConfirmContractDeployed(context.Background(), e.Ec, tx, e.ChainID)
+	return helpers.ConfirmContractDeployed(context.Background(), e.Ec, tx, e.ChainID), coordinator
+}
+
+func configureVRFCoordinator(e helpers.Environment, coordinator *vrf_coordinator.VRFCoordinator, maxCbGasLimit, maxCbArgsLen uint32) *gethtypes.Receipt {
+	tx, err := coordinator.SetConfig(e.Owner, vrf_coordinator.VRFCoordinatorConfig{
+		MaxCallbackGasLimit:        maxCbGasLimit,
+		MaxCallbackArgumentsLength: maxCbArgsLen,
+	})
+	helpers.PanicErr(err)
+	return helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID, "vrf coordinator setConfig")
 }
 
 func deployAuthorizedForwarder(e helpers.Environment, link common.Address, owner common.Address) common.Address {
@@ -70,6 +118,7 @@ func setAuthorizedSenders(e helpers.Environment, forwarder common.Address, sende
 	f, err := authorized_forwarder.NewAuthorizedForwarder(forwarder, e.Ec)
 	helpers.PanicErr(err)
 	tx, err := f.SetAuthorizedSenders(e.Owner, senders)
+	helpers.PanicErr(err)
 	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
 }
 
@@ -86,8 +135,8 @@ func deployVRFBeaconCoordinatorConsumer(e helpers.Environment, coordinatorAddres
 	return helpers.ConfirmContractDeployed(context.Background(), e.Ec, tx, e.ChainID)
 }
 
-func deployLoadTestVRFBeaconCoordinatorConsumer(e helpers.Environment, coordinatorAddress string, shouldFail bool, beaconPeriodBlocks *big.Int) common.Address {
-	_, tx, _, err := load_test_beacon_consumer.DeployLoadTestBeaconVRFConsumer(e.Owner, e.Ec, common.HexToAddress(coordinatorAddress), shouldFail, beaconPeriodBlocks)
+func deployLoadTestVRFBeaconCoordinatorConsumer(e helpers.Environment, routerAddress string, shouldFail bool, beaconPeriodBlocks *big.Int) common.Address {
+	_, tx, _, err := load_test_beacon_consumer.DeployLoadTestBeaconVRFConsumer(e.Owner, e.Ec, common.HexToAddress(routerAddress), shouldFail, beaconPeriodBlocks)
 	helpers.PanicErr(err)
 	return helpers.ConfirmContractDeployed(context.Background(), e.Ec, tx, e.ChainID)
 }
@@ -181,7 +230,7 @@ func setDKGConfig(e helpers.Environment, dkgAddress string, c dkgSetConfigArgs) 
 	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
 }
 
-func setVRFBeaconConfig(e helpers.Environment, vrfBeaconAddr string, c vrfBeaconSetConfigArgs) {
+func (c *vrfBeaconSetConfigArgs) setVRFBeaconConfig(e helpers.Environment, vrfBeaconAddr string) {
 	oracleIdentities := toOraclesIdentityList(
 		helpers.ParseAddressSlice(c.onchainPubKeys),
 		strings.Split(c.offchainPubKeys, ","),
@@ -241,7 +290,7 @@ func createSubscription(e helpers.Environment, vrfCoordinatorAddr string) {
 	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
 }
 
-func getSubscription(e helpers.Environment, vrfCoordinatorAddr string, subId uint64) vrf_coordinator.GetSubscription {
+func getSubscription(e helpers.Environment, vrfCoordinatorAddr string, subId *big.Int) vrf_coordinator.GetSubscription {
 	coordinator := newVRFCoordinator(common.HexToAddress(vrfCoordinatorAddr), e.Ec)
 
 	sub, err := coordinator.GetSubscription(nil, subId)
@@ -249,10 +298,37 @@ func getSubscription(e helpers.Environment, vrfCoordinatorAddr string, subId uin
 	return sub
 }
 
+// returns subscription ID that belongs to the given owner. Returns result found first
+func findSubscriptionID(e helpers.Environment, vrfCoordinatorAddr string) *big.Int {
+	// Use most recent 500 blocks as search window.
+	head, err := e.Ec.BlockNumber(context.Background())
+	helpers.PanicErr(err)
+	fopts := &bind.FilterOpts{
+		Start: head - 500,
+	}
+
+	coordinator := newVRFCoordinator(common.HexToAddress(vrfCoordinatorAddr), e.Ec)
+	subscriptionIterator, err := coordinator.FilterSubscriptionCreated(fopts, nil, []common.Address{e.Owner.From})
+	helpers.PanicErr(err)
+
+	if !subscriptionIterator.Next() {
+		helpers.PanicErr(fmt.Errorf("expected at leats 1 subID for the given owner %s", e.Owner.From.Hex()))
+	}
+	return subscriptionIterator.Event.SubId
+}
+
+func registerCoordinator(e helpers.Environment, routerAddress, coordinatorAddress string) {
+	router := newVRFRouter(common.HexToAddress(routerAddress), e.Ec)
+
+	tx, err := router.RegisterCoordinator(e.Owner, common.HexToAddress(coordinatorAddress))
+	helpers.PanicErr(err)
+	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
+}
+
 func addConsumer(e helpers.Environment, vrfCoordinatorAddr, consumerAddr string, subId *big.Int) {
 	coordinator := newVRFCoordinator(common.HexToAddress(vrfCoordinatorAddr), e.Ec)
 
-	tx, err := coordinator.AddConsumer(e.Owner, subId.Uint64(), common.HexToAddress(consumerAddr))
+	tx, err := coordinator.AddConsumer(e.Owner, subId, common.HexToAddress(consumerAddr))
 	helpers.PanicErr(err)
 	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
 }
@@ -265,13 +341,41 @@ func setPayees(e helpers.Environment, vrfBeaconAddr string, transmitters, payees
 	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
 }
 
-func eoaFundSubscription(e helpers.Environment, coordinatorAddress, linkAddress string, amount *big.Int, subID uint64) {
+func setBeaconBilling(e helpers.Environment, vrfBeaconAddr string, maximumGasPrice, reasonableGasPrice, observationPayment,
+	transmissionPayment, accountingGas uint64) {
+	beacon := newVRFBeacon(common.HexToAddress(vrfBeaconAddr), e.Ec)
+
+	tx, err := beacon.SetBilling(e.Owner, maximumGasPrice, reasonableGasPrice, observationPayment, transmissionPayment, big.NewInt(0).SetUint64(accountingGas))
+	helpers.PanicErr(err)
+	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
+}
+
+func setCoordinatorBilling(e helpers.Environment, vrfCoordinatorAddr string, useReasonableGasPrice bool, unusedGasPenaltyPercent uint8,
+	stalenessSeconds, redeemableRequestGasOverhead, callbackRequestGasOverhead, premiumPercentage, reasonableGasPriceStalenessBlocks uint32,
+	fallbackWeiPerUnitLink *big.Int) {
+	coordinator := newVRFCoordinator(common.HexToAddress(vrfCoordinatorAddr), e.Ec)
+
+	tx, err := coordinator.SetBillingConfig(e.Owner, vrf_coordinator.VRFBeaconTypesBillingConfig{
+		UseReasonableGasPrice:             useReasonableGasPrice,
+		UnusedGasPenaltyPercent:           unusedGasPenaltyPercent,
+		StalenessSeconds:                  stalenessSeconds,
+		RedeemableRequestGasOverhead:      redeemableRequestGasOverhead,
+		CallbackRequestGasOverhead:        callbackRequestGasOverhead,
+		PremiumPercentage:                 premiumPercentage,
+		ReasonableGasPriceStalenessBlocks: reasonableGasPriceStalenessBlocks,
+		FallbackWeiPerUnitLink:            fallbackWeiPerUnitLink,
+	})
+	helpers.PanicErr(err)
+	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
+}
+
+func eoaFundSubscription(e helpers.Environment, coordinatorAddress, linkAddress string, amount, subID *big.Int) {
 	linkToken, err := link_token_interface.NewLinkToken(common.HexToAddress(linkAddress), e.Ec)
 	helpers.PanicErr(err)
 	bal, err := linkToken.BalanceOf(nil, e.Owner.From)
 	helpers.PanicErr(err)
 	fmt.Println("Initial account balance:", bal, e.Owner.From.String(), "Funding amount:", amount.String())
-	b, err := utils.ABIEncode(`[{"type":"uint64"}]`, subID)
+	b, err := utils.ABIEncode(`[{"type":"uint256"}]`, subID)
 	helpers.PanicErr(err)
 	tx, err := linkToken.TransferAndCall(e.Owner, common.HexToAddress(coordinatorAddress), amount, b)
 	helpers.PanicErr(err)
@@ -321,23 +425,23 @@ func toOraclesIdentityList(onchainPubKeys []common.Address, offchainPubKeys, con
 	return o
 }
 
-func requestRandomness(e helpers.Environment, coordinatorAddress string, numWords uint16, subID uint64, confDelay *big.Int) {
-	coordinator := newVRFCoordinator(common.HexToAddress(coordinatorAddress), e.Ec)
+func requestRandomness(e helpers.Environment, routerAddress string, numWords uint16, subID, confDelay *big.Int) {
+	router := newVRFRouter(common.HexToAddress(routerAddress), e.Ec)
 
-	tx, err := coordinator.RequestRandomness(e.Owner, numWords, subID, confDelay)
+	tx, err := router.RequestRandomness(e.Owner, confDelay, numWords, confDelay, nil)
 	helpers.PanicErr(err)
 	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
 }
 
-func redeemRandomness(e helpers.Environment, coordinatorAddress string, requestID *big.Int) {
-	coordinator := newVRFCoordinator(common.HexToAddress(coordinatorAddress), e.Ec)
+func redeemRandomness(e helpers.Environment, routerAddress string, requestID, subID *big.Int) {
+	router := newVRFRouter(common.HexToAddress(routerAddress), e.Ec)
 
-	tx, err := coordinator.RedeemRandomness(e.Owner, requestID)
+	tx, err := router.RedeemRandomness(e.Owner, subID, requestID, nil)
 	helpers.PanicErr(err)
 	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
 }
 
-func requestRandomnessFromConsumer(e helpers.Environment, consumerAddress string, numWords uint16, subID uint64, confDelay *big.Int) *big.Int {
+func requestRandomnessFromConsumer(e helpers.Environment, consumerAddress string, numWords uint16, subID, confDelay *big.Int) *big.Int {
 	consumer := newVRFBeaconCoordinatorConsumer(common.HexToAddress(consumerAddress), e.Ec)
 
 	tx, err := consumer.TestRequestRandomness(e.Owner, numWords, subID, confDelay)
@@ -377,8 +481,7 @@ func requestRandomnessCallback(
 	e helpers.Environment,
 	consumerAddress string,
 	numWords uint16,
-	subID uint64,
-	confDelay *big.Int,
+	subID, confDelay *big.Int,
 	callbackGasLimit uint32,
 	args []byte,
 ) (requestID *big.Int) {
@@ -404,10 +507,10 @@ func requestRandomnessCallback(
 	return requestID
 }
 
-func redeemRandomnessFromConsumer(e helpers.Environment, consumerAddress string, requestID *big.Int, numWords int64) {
+func redeemRandomnessFromConsumer(e helpers.Environment, consumerAddress string, subID, requestID *big.Int, numWords int64) {
 	consumer := newVRFBeaconCoordinatorConsumer(common.HexToAddress(consumerAddress), e.Ec)
 
-	tx, err := consumer.TestRedeemRandomness(e.Owner, requestID)
+	tx, err := consumer.TestRedeemRandomness(e.Owner, subID, requestID)
 	helpers.PanicErr(err)
 	helpers.ConfirmTXMined(context.Background(), e.Ec, tx, e.ChainID)
 
@@ -426,6 +529,12 @@ func newVRFCoordinator(addr common.Address, client *ethclient.Client) *vrf_coord
 	coordinator, err := vrf_coordinator.NewVRFCoordinator(addr, client)
 	helpers.PanicErr(err)
 	return coordinator
+}
+
+func newVRFRouter(addr common.Address, client *ethclient.Client) *vrf_router.VRFRouter {
+	router, err := vrf_router.NewVRFRouter(addr, client)
+	helpers.PanicErr(err)
+	return router
 }
 
 func newDKG(addr common.Address, client *ethclient.Client) *dkgContract.DKG {
@@ -462,32 +571,31 @@ func decodeHexTo32ByteArray(val string) (byteArray [32]byte) {
 	return
 }
 
-func setupOCR2VRFNodeFromClient(client *cmd.Client, context *cli.Context, e helpers.Environment) *cmd.SetupOCR2VRFNodePayload {
+func setupOCR2VRFNodeFromClient(client *cmd.Shell, context *cli.Context, e helpers.Environment) *cmd.SetupOCR2VRFNodePayload {
 	payload, err := client.ConfigureOCR2VRFNode(context, e.Owner, e.Ec)
 	helpers.PanicErr(err)
 
 	return payload
 }
 
-func configureEnvironmentVariables(useForwarder bool) {
-	helpers.PanicErr(os.Setenv("ETH_USE_FORWARDERS", fmt.Sprintf("%t", useForwarder)))
-	helpers.PanicErr(os.Setenv("FEATURE_OFFCHAIN_REPORTING2", "true"))
-	helpers.PanicErr(os.Setenv("FEATURE_LOG_POLLER", "true"))
-	helpers.PanicErr(os.Setenv("SKIP_DATABASE_PASSWORD_COMPLEXITY_CHECK", "true"))
-	helpers.PanicErr(os.Setenv("P2P_NETWORKING_STACK", "V2"))
-	helpers.PanicErr(os.Setenv("P2PV2_LISTEN_ADDRESSES", "127.0.0.1:8000"))
-	helpers.PanicErr(os.Setenv("ETH_HEAD_TRACKER_HISTORY_DEPTH", "1"))
-	helpers.PanicErr(os.Setenv("ETH_FINALITY_DEPTH", "1"))
+func configureEnvironmentVariables(useForwarder bool, chainID int64, wsUrl string, ethURL string, index int, databasePrefix string, databaseSuffixes string) {
+	// Set permitted envars for v2.
+	helpers.PanicErr(os.Setenv("CL_DATABASE_URL", fmt.Sprintf("%s-%d?%s", databasePrefix, index, databaseSuffixes)))
+	helpers.PanicErr(os.Setenv("CL_CONFIG", fmt.Sprintf(tomlConfigTemplate, chainID, useForwarder, ethURL, wsUrl)))
+
+	// Unset prohibited envars for v2.
+	helpers.PanicErr(os.Unsetenv("ETH_URL"))
+	helpers.PanicErr(os.Unsetenv("ETH_HTTP_URL"))
+	helpers.PanicErr(os.Unsetenv("ETH_CHAIN_ID"))
 }
 
-func resetDatabase(client *cmd.Client, context *cli.Context, index int, databasePrefix string, databaseSuffixes string) {
-	helpers.PanicErr(os.Setenv("DATABASE_URL", fmt.Sprintf("%s-%d?%s", databasePrefix, index, databaseSuffixes)))
+func resetDatabase(client *cmd.Shell, context *cli.Context) {
 	helpers.PanicErr(client.ResetDatabase(context))
 }
 
-func newSetupClient() *cmd.Client {
+func newSetupClient() *cmd.Shell {
 	prompter := cmd.NewTerminalPrompter()
-	return &cmd.Client{
+	return &cmd.Shell{
 		Renderer:                       cmd.RendererTable{Writer: os.Stdout},
 		AppFactory:                     cmd.ChainlinkAppFactory{},
 		KeyStoreAuthenticator:          cmd.TerminalKeyStoreAuthenticator{Prompter: prompter},
@@ -503,8 +611,7 @@ func requestRandomnessCallbackBatch(
 	e helpers.Environment,
 	consumerAddress string,
 	numWords uint16,
-	subID uint64,
-	confDelay *big.Int,
+	subID, confDelay *big.Int,
 	callbackGasLimit uint32,
 	args []byte,
 	batchSize *big.Int,

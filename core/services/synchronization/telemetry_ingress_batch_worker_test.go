@@ -7,10 +7,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/smartcontractkit/chainlink/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/services/synchronization"
-	"github.com/smartcontractkit/chainlink/core/services/synchronization/mocks"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/synchronization"
+	"github.com/smartcontractkit/chainlink/v2/core/services/synchronization/mocks"
 )
 
 func TestTelemetryIngressWorker_BuildTelemBatchReq(t *testing.T) {
@@ -26,11 +26,12 @@ func TestTelemetryIngressWorker_BuildTelemBatchReq(t *testing.T) {
 		uint(maxTelemBatchSize),
 		time.Millisecond*1,
 		time.Second,
-		new(mocks.TelemClient),
+		mocks.NewTelemClient(t),
 		&sync.WaitGroup{},
 		make(chan struct{}),
 		chTelemetry,
 		"0xa",
+		synchronization.OCR,
 		logger.TestLogger(t),
 		false,
 	)
@@ -43,13 +44,17 @@ func TestTelemetryIngressWorker_BuildTelemBatchReq(t *testing.T) {
 
 	// Batch request should not exceed the max batch size
 	batchReq1 := worker.BuildTelemBatchReq()
-	assert.Equal(t, batchReq1.ContractId, "0xa")
+	assert.Equal(t, "0xa", batchReq1.ContractId)
+	assert.Equal(t, string(synchronization.OCR), batchReq1.TelemetryType)
 	assert.Len(t, batchReq1.Telemetry, maxTelemBatchSize)
 	assert.Len(t, chTelemetry, 2)
+	assert.Greater(t, batchReq1.SentAt, int64(0))
 
 	// Remainder of telemetry should be batched on next call
 	batchReq2 := worker.BuildTelemBatchReq()
-	assert.Equal(t, batchReq2.ContractId, "0xa")
+	assert.Equal(t, "0xa", batchReq2.ContractId)
+	assert.Equal(t, string(synchronization.OCR), batchReq2.TelemetryType)
 	assert.Len(t, batchReq2.Telemetry, 2)
 	assert.Len(t, chTelemetry, 0)
+	assert.Greater(t, batchReq2.SentAt, int64(0))
 }

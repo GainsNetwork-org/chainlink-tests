@@ -15,11 +15,11 @@ import (
 
 	relaytypes "github.com/smartcontractkit/chainlink-relay/pkg/types"
 
-	"github.com/smartcontractkit/chainlink/core/chains/evm"
-	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/services/keystore"
-	"github.com/smartcontractkit/chainlink/core/services/ocr2/plugins/dkg/config"
-	types "github.com/smartcontractkit/chainlink/core/services/relay/evm/types"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/dkg/config"
+	types "github.com/smartcontractkit/chainlink/v2/core/services/relay/evm/types"
 )
 
 // DKGProvider provides all components needed for a DKG plugin.
@@ -101,7 +101,7 @@ func (r *ocr2vrfRelayer) NewOCR2VRFProvider(rargs relaytypes.RelayArgs, pargs re
 
 type dkgProvider struct {
 	*configWatcher
-	contractTransmitter *ContractTransmitter
+	contractTransmitter ContractTransmitter
 	pluginConfig        config.PluginConfig
 }
 
@@ -111,7 +111,7 @@ func (c *dkgProvider) ContractTransmitter() ocrtypes.ContractTransmitter {
 
 type ocr2vrfProvider struct {
 	*configWatcher
-	contractTransmitter *ContractTransmitter
+	contractTransmitter ContractTransmitter
 }
 
 func (c *ocr2vrfProvider) ContractTransmitter() ocrtypes.ContractTransmitter {

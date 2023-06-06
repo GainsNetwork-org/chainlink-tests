@@ -2,6 +2,7 @@ package ocr2keeper_test
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -26,29 +27,37 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/umbracle/ethgo/abi"
 
-	"github.com/smartcontractkit/chainlink/core/assets"
-	"github.com/smartcontractkit/chainlink/core/chains/evm/forwarders"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/authorized_forwarder"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/basic_upkeep_contract"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/keeper_registry_logic2_0"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/keeper_registry_wrapper2_0"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/link_token_interface"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/mock_v3_aggregator_contract"
-	"github.com/smartcontractkit/chainlink/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/core/internal/cltest/heavyweight"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/services/chainlink"
-	"github.com/smartcontractkit/chainlink/core/services/keystore/chaintype"
-	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
-	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ocr2key"
-	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/p2pkey"
-	"github.com/smartcontractkit/chainlink/core/services/ocr2/validate"
-	"github.com/smartcontractkit/chainlink/core/services/ocrbootstrap"
-	"github.com/smartcontractkit/chainlink/core/services/pipeline"
-	"github.com/smartcontractkit/chainlink/core/services/relay/evm"
-	"github.com/smartcontractkit/chainlink/core/store/models"
-	"github.com/smartcontractkit/chainlink/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/forwarders"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/logpoller"
+	v2 "github.com/smartcontractkit/chainlink/v2/core/config/v2"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/authorized_forwarder"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/basic_upkeep_contract"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_logic2_0"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/keeper_registry_wrapper2_0"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/link_token_interface"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/mock_v3_aggregator_contract"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
+	"github.com/smartcontractkit/chainlink/v2/core/services/job"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/chaintype"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ocr2key"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/p2pkey"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/plugins/ocr2keeper"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocr2/validate"
+	"github.com/smartcontractkit/chainlink/v2/core/services/ocrbootstrap"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
+	"github.com/smartcontractkit/chainlink/v2/core/services/relay/evm"
+	"github.com/smartcontractkit/chainlink/v2/core/store/models"
+	"github.com/smartcontractkit/chainlink/v2/core/utils"
+)
+
+const (
+	MercuryCredName = "cred1"
 )
 
 var (
@@ -120,6 +129,13 @@ func setupNode(
 
 		c.EVM[0].Transactions.ForwardersEnabled = ptr(true)
 		c.EVM[0].GasEstimator.Mode = ptr("FixedPrice")
+		s.Mercury.Credentials = map[string]v2.MercuryCredentials{
+			MercuryCredName: {
+				URL:      models.MustSecretURL("https://mercury.chain.link"),
+				Username: models.NewSecret("username1"),
+				Password: models.NewSecret("password1"),
+			},
+		}
 	})
 
 	app := cltest.NewApplicationWithConfigV2AndKeyOnSimulatedBlockchain(t, config, backend, nodeKey, p2pKey)
@@ -178,7 +194,7 @@ func getUpkeepIdFromTx(t *testing.T, registry *keeper_registry_wrapper2_0.Keeper
 	return parsedLog.Id
 }
 
-func TestIntegration_KeeperPlugin(t *testing.T) {
+func TestIntegration_KeeperPluginBasic(t *testing.T) {
 	g := gomega.NewWithT(t)
 	lggr := logger.TestLogger(t)
 
@@ -199,7 +215,7 @@ func TestIntegration_KeeperPlugin(t *testing.T) {
 	}
 
 	backend := cltest.NewSimulatedBackend(t, genesisData, uint32(ethconfig.Defaults.Miner.GasCeil))
-	stopMining := cltest.Mine(backend, 6*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
+	stopMining := cltest.Mine(backend, 3*time.Second) // Should be greater than deltaRound since we cannot access old blocks on simulated blockchain
 	defer stopMining()
 
 	// Deploy contracts
@@ -271,12 +287,14 @@ func TestIntegration_KeeperPlugin(t *testing.T) {
 		p2pv2Bootstrappers = [
 		  "%s"
 		]
-		
+
 		[relayConfig]
 		chainID = 1337
-		
+
 		[pluginConfig]
-		`, i, registry.Address(), node.KeyBundle.ID(), node.Transmitter, fmt.Sprintf("%s@127.0.0.1:%d", bootstrapPeerID, bootstrapNodePort)))
+		maxServiceWorkers = 100
+		mercuryCredentialName = "%s"
+		`, i, registry.Address(), node.KeyBundle.ID(), node.Transmitter, fmt.Sprintf("%s@127.0.0.1:%d", bootstrapPeerID, bootstrapNodePort), MercuryCredName))
 	}
 
 	// Setup config on contract
@@ -298,23 +316,23 @@ func TestIntegration_KeeperPlugin(t *testing.T) {
 	}, configType)
 	require.NoError(t, err)
 	signers, transmitters, threshold, onchainConfig, offchainConfigVersion, offchainConfig, err := confighelper.ContractSetConfigArgsForTests(
-		10*time.Second,       // deltaProgress time.Duration,
-		10*time.Second,       // deltaResend time.Duration,
-		5*time.Second,        // deltaRound time.Duration,
-		500*time.Millisecond, // deltaGrace time.Duration,
-		2*time.Second,        // deltaStage time.Duration,
-		3,                    // rMax uint8,
+		10*time.Second,        // deltaProgress time.Duration,
+		10*time.Second,        // deltaResend time.Duration,
+		2500*time.Millisecond, // deltaRound time.Duration,
+		40*time.Millisecond,   // deltaGrace time.Duration,
+		15*time.Second,        // deltaStage time.Duration,
+		3,                     // rMax uint8,
 		[]int{1, 1, 1, 1},
 		oracles,
 		ocr2keepers.OffchainConfig{
-			PerformLockoutWindow: 100 * 12 * 1000, // ~100 block lockout (on goerli)
-			UniqueReports:        false,           // set quorum requirements
+			PerformLockoutWindow: 100 * 3 * 1000, // ~100 block lockout (on goerli)
+			MinConfirmations:     1,
 		}.Encode(), // reportingPluginConfig []byte,
-		50*time.Millisecond, // Max duration query
-		1*time.Second,       // Max duration observation
-		1*time.Second,
-		1*time.Second,
-		1*time.Second,
+		20*time.Millisecond,   // Max duration query
+		1600*time.Millisecond, // Max duration observation
+		800*time.Millisecond,
+		20*time.Millisecond,
+		20*time.Millisecond,
 		1, // f
 		onchainConfig,
 	)
@@ -367,7 +385,7 @@ func TestIntegration_KeeperPlugin(t *testing.T) {
 	require.NoError(t, err)
 	backend.Commit()
 
-	lggr.Infow("Upkeep registered and funded")
+	lggr.Infow("Upkeep registered and funded", "upkeepID", upkeepID.String())
 
 	// keeper job is triggered and payload is received
 	receivedBytes := func() []byte {
@@ -525,12 +543,13 @@ func TestIntegration_KeeperPluginForwarderEnabled(t *testing.T) {
 		  "%s"
 		]
 		forwardingAllowed = true
-		
+
 		[relayConfig]
 		chainID = 1337
-		
+
 		[pluginConfig]
-		`, i, registry.Address(), node.KeyBundle.ID(), node.Transmitter, fmt.Sprintf("%s@127.0.0.1:%d", bootstrapPeerID, bootstrapNodePort)))
+		mercuryCredentialName = "%s"
+		`, i, registry.Address(), node.KeyBundle.ID(), node.Transmitter, fmt.Sprintf("%s@127.0.0.1:%d", bootstrapPeerID, bootstrapNodePort), MercuryCredName))
 	}
 
 	// Setup config on contract
@@ -562,7 +581,6 @@ func TestIntegration_KeeperPluginForwarderEnabled(t *testing.T) {
 		oracles,
 		ocr2keepers.OffchainConfig{
 			PerformLockoutWindow: 100 * 12 * 1000, // ~100 block lockout (on goerli)
-			UniqueReports:        false,           // set quorum requirements
 		}.Encode(), // reportingPluginConfig []byte,
 		50*time.Millisecond, // Max duration query
 		1*time.Second,       // Max duration observation
@@ -659,3 +677,29 @@ func TestIntegration_KeeperPluginForwarderEnabled(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestFilterNamesFromSpec(t *testing.T) {
+	b := make([]byte, 20)
+	_, err := rand.Read(b)
+	require.NoError(t, err)
+	address := common.HexToAddress(hexutil.Encode(b))
+
+	spec := &job.OCR2OracleSpec{
+		PluginType: job.OCR2Keeper,
+		ContractID: address.String(), // valid contract addr
+	}
+
+	names, err := ocr2keeper.FilterNamesFromSpec(spec)
+	require.NoError(t, err)
+
+	assert.Len(t, names, 2)
+	assert.Equal(t, logpoller.FilterName("OCR2KeeperRegistry - LogProvider", address), names[0])
+	assert.Equal(t, logpoller.FilterName("EvmRegistry - Upkeep events for", address), names[1])
+
+	spec = &job.OCR2OracleSpec{
+		PluginType: job.OCR2Keeper,
+		ContractID: "0x5431", // invalid contract addr
+	}
+	names, err = ocr2keeper.FilterNamesFromSpec(spec)
+	require.ErrorContains(t, err, "not a valid EIP55 formatted address")
+}

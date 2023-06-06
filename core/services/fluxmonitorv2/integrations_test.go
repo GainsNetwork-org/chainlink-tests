@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,27 +24,26 @@ import (
 	"github.com/smartcontractkit/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/atomic"
 
-	"github.com/smartcontractkit/chainlink/core/assets"
-	"github.com/smartcontractkit/chainlink/core/bridges"
-	"github.com/smartcontractkit/chainlink/core/chains/evm/log"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/flags_wrapper"
-	faw "github.com/smartcontractkit/chainlink/core/gethwrappers/generated/flux_aggregator_wrapper"
-	"github.com/smartcontractkit/chainlink/core/gethwrappers/generated/link_token_interface"
-	"github.com/smartcontractkit/chainlink/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/core/internal/cltest/heavyweight"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils"
-	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
-	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/services/chainlink"
-	"github.com/smartcontractkit/chainlink/core/services/fluxmonitorv2"
-	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
-	"github.com/smartcontractkit/chainlink/core/services/pg"
-	"github.com/smartcontractkit/chainlink/core/services/pipeline"
-	"github.com/smartcontractkit/chainlink/core/store/models"
-	"github.com/smartcontractkit/chainlink/core/utils"
-	"github.com/smartcontractkit/chainlink/core/web"
+	"github.com/smartcontractkit/chainlink/v2/core/assets"
+	"github.com/smartcontractkit/chainlink/v2/core/bridges"
+	"github.com/smartcontractkit/chainlink/v2/core/chains/evm/log"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/flags_wrapper"
+	faw "github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/flux_aggregator_wrapper"
+	"github.com/smartcontractkit/chainlink/v2/core/gethwrappers/generated/link_token_interface"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/cltest/heavyweight"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils"
+	"github.com/smartcontractkit/chainlink/v2/core/internal/testutils/evmtest"
+	"github.com/smartcontractkit/chainlink/v2/core/logger"
+	"github.com/smartcontractkit/chainlink/v2/core/services/chainlink"
+	"github.com/smartcontractkit/chainlink/v2/core/services/fluxmonitorv2"
+	"github.com/smartcontractkit/chainlink/v2/core/services/keystore/keys/ethkey"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pg"
+	"github.com/smartcontractkit/chainlink/v2/core/services/pipeline"
+	"github.com/smartcontractkit/chainlink/v2/core/store/models"
+	"github.com/smartcontractkit/chainlink/v2/core/utils"
+	"github.com/smartcontractkit/chainlink/v2/core/web"
 )
 
 const description = "exactly thirty-three characters!!"
@@ -231,9 +231,9 @@ func checkOraclesAdded(t *testing.T, f fluxAggregatorUniverse, oracleList []comm
 	}
 }
 
-func generatePriceResponseFn(price *atomic.Int64) func() string {
+func generatePriceResponseFn(price func() int64) func() string {
 	return func() string {
-		return fmt.Sprintf(`{"data":{"result": %d}}`, price.Load())
+		return fmt.Sprintf(`{"data":{"result": %d}}`, price())
 	}
 }
 
@@ -249,7 +249,7 @@ type answerParams struct {
 func checkSubmission(t *testing.T, p answerParams, currentBalance int64, receiptBlock uint64) {
 	t.Helper()
 	if receiptBlock == 0 {
-		receiptBlock = p.fa.backend.Blockchain().CurrentBlock().Number().Uint64()
+		receiptBlock = p.fa.backend.Blockchain().CurrentBlock().Number.Uint64()
 	}
 	blockRange := &bind.FilterOpts{Start: 0, End: &receiptBlock}
 
@@ -458,9 +458,10 @@ func TestFluxMonitor_Deviation(t *testing.T) {
 			expectedMeta := map[string]v{}
 			var expMetaMu sync.Mutex
 
-			reportPrice := atomic.NewInt64(100)
+			var reportPrice atomic.Int64
+			reportPrice.Store(100)
 			mockServer := cltest.NewHTTPMockServerWithAlterableResponseAndRequest(t,
-				generatePriceResponseFn(reportPrice),
+				generatePriceResponseFn(reportPrice.Load),
 				func(r *http.Request) {
 					b, err1 := io.ReadAll(r.Body)
 					require.NoError(t, err1)
@@ -625,9 +626,10 @@ func TestFluxMonitor_NewRound(t *testing.T) {
 	initialBalance := currentBalance(t, &fa).Int64()
 
 	// Create mock server
-	reportPrice := atomic.NewInt64(1)
+	var reportPrice atomic.Int64
+	reportPrice.Store(1)
 	mockServer := cltest.NewHTTPMockServerWithAlterableResponse(t,
-		generatePriceResponseFn(reportPrice),
+		generatePriceResponseFn(reportPrice.Load),
 	)
 	t.Cleanup(mockServer.Close)
 
@@ -662,8 +664,10 @@ ds1 -> ds1_parse
 	s = fmt.Sprintf(s, fa.aggregatorContractAddress, pollTimerPeriod, mockServer.URL)
 
 	// raise flags to disable polling
-	fa.flagsContract.RaiseFlag(fa.sergey, utils.ZeroAddress) // global kill switch
-	fa.flagsContract.RaiseFlag(fa.sergey, fa.aggregatorContractAddress)
+	_, err = fa.flagsContract.RaiseFlag(fa.sergey, utils.ZeroAddress) // global kill switch
+	require.NoError(t, err)
+	_, err = fa.flagsContract.RaiseFlag(fa.sergey, fa.aggregatorContractAddress)
+	require.NoError(t, err)
 	fa.backend.Commit()
 
 	requestBody, err := json.Marshal(web.CreateJobRequest{
@@ -730,9 +734,10 @@ func TestFluxMonitor_HibernationMode(t *testing.T) {
 	})
 
 	// Create mock server
-	reportPrice := atomic.NewInt64(1)
+	var reportPrice atomic.Int64
+	reportPrice.Store(1)
 	mockServer := cltest.NewHTTPMockServerWithAlterableResponse(t,
-		generatePriceResponseFn(reportPrice),
+		generatePriceResponseFn(reportPrice.Load),
 	)
 	t.Cleanup(mockServer.Close)
 
@@ -767,8 +772,11 @@ ds1 -> ds1_parse
 	s = fmt.Sprintf(s, fa.aggregatorContractAddress, "1000ms", mockServer.URL)
 
 	// raise flags
-	fa.flagsContract.RaiseFlag(fa.sergey, utils.ZeroAddress) // global kill switch
-	fa.flagsContract.RaiseFlag(fa.sergey, fa.aggregatorContractAddress)
+	_, err = fa.flagsContract.RaiseFlag(fa.sergey, utils.ZeroAddress) // global kill switch
+	require.NoError(t, err)
+
+	_, err = fa.flagsContract.RaiseFlag(fa.sergey, fa.aggregatorContractAddress)
+	require.NoError(t, err)
 	fa.backend.Commit()
 
 	requestBody, err := json.Marshal(web.CreateJobRequest{
@@ -783,7 +791,8 @@ ds1 -> ds1_parse
 	cltest.AssertPipelineRunsStays(t, j.PipelineSpec.ID, app.GetSqlxDB(), 0)
 
 	// lower global kill switch flag - should trigger job run
-	fa.flagsContract.LowerFlags(fa.sergey, []common.Address{utils.ZeroAddress})
+	_, err = fa.flagsContract.LowerFlags(fa.sergey, []common.Address{utils.ZeroAddress})
+	require.NoError(t, err)
 	fa.backend.Commit()
 	awaitSubmission(t, fa.backend, submissionReceived)
 
@@ -791,7 +800,8 @@ ds1 -> ds1_parse
 	awaitSubmission(t, fa.backend, submissionReceived)
 
 	// lower contract's flag - should have no effect
-	fa.flagsContract.LowerFlags(fa.sergey, []common.Address{fa.aggregatorContractAddress})
+	_, err = fa.flagsContract.LowerFlags(fa.sergey, []common.Address{fa.aggregatorContractAddress})
+	require.NoError(t, err)
 	fa.backend.Commit()
 	assertNoSubmission(t, submissionReceived, 5*pollTimerPeriod, "should not trigger a new run because FM is already hibernating")
 
@@ -800,8 +810,10 @@ ds1 -> ds1_parse
 	awaitSubmission(t, fa.backend, submissionReceived)
 
 	// raise both flags
-	fa.flagsContract.RaiseFlag(fa.sergey, fa.aggregatorContractAddress)
-	fa.flagsContract.RaiseFlag(fa.sergey, utils.ZeroAddress)
+	_, err = fa.flagsContract.RaiseFlag(fa.sergey, fa.aggregatorContractAddress)
+	require.NoError(t, err)
+	_, err = fa.flagsContract.RaiseFlag(fa.sergey, utils.ZeroAddress)
+	require.NoError(t, err)
 	fa.backend.Commit()
 
 	// wait for FM to receive flags raised logs
@@ -837,9 +849,10 @@ func TestFluxMonitor_InvalidSubmission(t *testing.T) {
 
 	// Report a price that is above the maximum allowed value,
 	// causing it to revert.
-	reportPrice := atomic.NewInt64(10001) // 10001 ETH/USD price is outside the range.
+	var reportPrice atomic.Int64
+	reportPrice.Store(10001) // 10001 ETH/USD price is outside the range.
 	mockServer := cltest.NewHTTPMockServerWithAlterableResponse(t,
-		generatePriceResponseFn(reportPrice),
+		generatePriceResponseFn(reportPrice.Load),
 	)
 	t.Cleanup(mockServer.Close)
 
@@ -869,8 +882,10 @@ ds1 -> ds1_parse
 	s := fmt.Sprintf(toml, fa.aggregatorContractAddress, "100ms", mockServer.URL)
 
 	// raise flags
-	fa.flagsContract.RaiseFlag(fa.sergey, utils.ZeroAddress) // global kill switch
-	fa.flagsContract.RaiseFlag(fa.sergey, fa.aggregatorContractAddress)
+	_, err = fa.flagsContract.RaiseFlag(fa.sergey, utils.ZeroAddress) // global kill switch
+	require.NoError(t, err)
+	_, err = fa.flagsContract.RaiseFlag(fa.sergey, fa.aggregatorContractAddress)
+	require.NoError(t, err)
 	fa.backend.Commit()
 
 	requestBody, err := json.Marshal(web.CreateJobRequest{
@@ -928,7 +943,8 @@ func TestFluxMonitorAntiSpamLogic(t *testing.T) {
 	// The initial balance is the LINK balance of flux aggregator contract. We
 	// use it to check that the fee for submitting an answer has been paid out.
 	initialBalance := currentBalance(t, &fa).Int64()
-	reportPrice := atomic.NewInt64(answer)
+	var reportPrice atomic.Int64
+	reportPrice.Store(answer)
 	priceResponse := func() string {
 		return fmt.Sprintf(`{"data":{"result": %d}}`, reportPrice.Load())
 	}
