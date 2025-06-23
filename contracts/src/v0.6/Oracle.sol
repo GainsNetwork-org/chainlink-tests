@@ -62,13 +62,32 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
   /**
    * @notice Deploy with the address of the LINK token
    * @dev Sets the LinkToken address for the imported LinkTokenInterface
-   * @param _link The address of the LINK token
    */
-  constructor(address _link)
+  constructor()
     public
-    Ownable()
   {
-    LinkToken = LinkTokenInterface(_link); // external but already deployed and unalterable
+    uint256 chainId;
+    assembly {
+      chainId := chainid()
+    }
+
+    // Set LinkToken
+    if(chainId == 137) { // Polygon
+      LinkToken = LinkTokenInterface(0xb0897686c545045aFc77CF20eC7A532E3120E0F1);
+    } else if(chainId == 8453) { // Base
+      LinkToken = LinkTokenInterface(0x88Fb150BDc53A65fe94Dea0c9BA0a6dAf8C6e196);
+    } else if(chainId == 42161) { // Arbitrum Mainnet
+      LinkToken = LinkTokenInterface(0xf97f4df75117a78c1A5a0DBb814Af92458539FB4);
+    } else if(chainId == 33139) { // Apechain
+      LinkToken = LinkTokenInterface(0xC23EEb3AD25C9b0ffb2B353dbf9e03A60bE06a99);
+    } else if(chainId == 421614) { // Arbitrum Sepolia
+      LinkToken = LinkTokenInterface(0xb1D4538B4571d411F07960EF2838Ce337FE1E80E);
+    } else {
+      revert("Unsupported chain");
+    }
+
+    // Set owner to the original caller (supports CREATE2)
+    _transferOwnership(tx.origin);
   }
 
   /**
@@ -76,7 +95,7 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
   * @dev When calldata.length === 36 bytes, forwards message to fulfillOracleRequestShort
   */
   fallback() external payable {
-    if(msg.data.length == 36) { // 36 = sig + 1 word
+    if(msg.data.length == 68) { // 68 = sig + 1 word (data) + 1 word (request data hash)
       uint32 index = uint32(msg.sig);
 
       // if sig is gt 0x0FFFFFFF (the max request index we allow) then it's not one of our calls
@@ -84,8 +103,9 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
         return;
 
       // call fulfillOracleRequestShort
-      bytes32 _data = abi.decode(msg.data[4:], (bytes32));
-      fulfillOracleRequestShort(s_indexRequests[index], _data);
+      bytes32 _data = abi.decode(msg.data[4:36], (bytes32));
+      bytes32 _requestDataHash = abi.decode(msg.data[36:], (bytes32));
+      fulfillOracleRequestShort(s_indexRequests[index], _data, _requestDataHash);
       delete s_indexRequests[index];
     }
   }
@@ -128,7 +148,10 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
         _payment,
         _callbackAddress,
         _callbackFunctionId,
-        expiration
+        expiration,
+        // Note: we also use the hashed CBOR data to add uniqueness to the request ID in case of reorgs.
+        // Worst case scenario, at least the request would need to match the correct pairId (always included in _data)
+        keccak256(_data)
       )
     );
 
@@ -167,7 +190,7 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
   }
 
   /**
-   * @notice Called by the Chainlink node to fulfill requests
+   * @notice This request will always fail. This contract is only meant to be called through fulfillOracleRequestShort.
    * @dev Given params must hash back to the commitment stored from `oracleRequest`.
    * Will call the callback address' callback function without bubbling up error
    * checking in a `require` so that the node can get paid.
@@ -199,6 +222,7 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
         _callbackAddress,
         _callbackFunctionId,
         _expiration
+        // Note: no hash of the CBOR data here, these requests will always fail the paramsHash check
       )
     );
     require(commitments[_requestId] == paramsHash, "Params do not match request ID");
@@ -221,11 +245,13 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
    * Will call the callback address' callback function without bubbling up error
    * checking in a `require` so that the node can get paid.
    * @param _requestId The fulfillment request ID that must match the requester's
+   * @param _requestDataHash Keccak256 hash of the CBOR data sent in the request
    * @param _data The data to return to the consuming contract
    * @return Status if the external call was successful
    */
   function fulfillOracleRequestShort(
     bytes32 _requestId,
+    bytes32 _requestDataHash,
     bytes32 _data
   )
     public
@@ -240,7 +266,8 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
         uint(request.payment),
         request.callbackAddress,
         request.callbackFunctionId,
-        uint(request.expiration)
+        uint(request.expiration),
+        _requestDataHash // hash of the CBOR data sent in the request
       )
     );
     require(commitments[_requestId] == paramsHash, "Params do not match request ID");
@@ -297,6 +324,15 @@ contract Oracle is ChainlinkRequestInterface, OracleInterface, Ownable, LinkToke
   {
     withdrawableTokens = withdrawableTokens.sub(_amount);
     assert(LinkToken.transfer(_recipient, _amount));
+  }
+
+  /**
+   * @notice Allows the node operator to withdraw ETH sent to the contract
+   */
+  function recoverEth() external onlyOwner {
+    // solhint-disable-next-line avoid-low-level-calls
+    (bool success, ) = msg.sender.call{value: address(this).balance}("");
+    require(success, "Failed to recover ETH");
   }
 
   /**
